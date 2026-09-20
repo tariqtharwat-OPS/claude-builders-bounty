@@ -11,6 +11,13 @@
 
 set -euo pipefail
 
+# Claude Code sends PreToolUse hooks a JSON object on stdin.  Keep the
+# argument form as a small, convenient local smoke-test interface.
+PROTOCOL_INPUT=""
+if [ "$#" -eq 0 ]; then
+  PROTOCOL_INPUT=$(cat)
+fi
+
 # Log file per spec: ~/.claude/hooks/blocked.log
 LOG_FILE="$HOME/.claude/hooks/blocked.log"
 
@@ -23,6 +30,7 @@ DESTRUCTIVE_PATTERNS=(
   "rm\s+-rf\s+/"                    # rm -rf /
   "rm\s+-rf\s+\*"                   # rm -rf *
   "rm\s+-rf\s+\.\."                 # rm -rf ..
+  "rm\s+(--recursive|--force|-r|-f|-[rf]{2})\s+(--recursive|--force|-r|-f|-[rf]{2})\s+(\/|\*|\.\.)" # split rm flags
   
   # Database destruction
   "DROP\s+TABLE"                    # DROP TABLE
@@ -109,6 +117,28 @@ validate_command() {
   # Command is safe - allow execution
   return 0
 }
+
+# Protocol mode: emit only Claude Code's structured hook response on stdout.
+if [ -n "$PROTOCOL_INPUT" ]; then
+  command=$(printf '%s' "$PROTOCOL_INPUT" | python3 -c '
+import json, sys
+try:
+    data=json.load(sys.stdin)
+    if data.get("tool_name") == "Bash":
+        print(data.get("tool_input", {}).get("command", ""))
+    else:
+        print("")
+except (ValueError, TypeError, AttributeError):
+    print("")
+')
+  if [ -n "$command" ] && is_destructive "$command"; then
+    log_blocked "$command"
+    python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Destructive command blocked by safety hook."}}))'
+  else
+    python3 -c 'import json; print(json.dumps({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}))'
+  fi
+  exit 0
+fi
 
 # If called with arguments, validate the first argument as a command
 if [ $# -gt 0 ]; then

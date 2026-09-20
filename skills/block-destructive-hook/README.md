@@ -19,6 +19,14 @@ chmod +x ~/.claude/hooks/block-destructive.sh
 | System | `dd if=/dev/zero`, `mkfs.*`, `shutdown`, `halt`, `init 0` |
 | Remote exec | `wget … \| bash`, `curl … \| sh`, `python -c "import os; system(…)"` |
 
+## Hook Protocol
+
+Claude Code `PreToolUse` invokes the script with a JSON request on stdin, for example
+`{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}`. The hook emits
+structured JSON with `hookSpecificOutput.permissionDecision` set to `deny` or
+`allow`. The legacy `block-destructive.sh "command"` form remains available for
+manual smoke tests.
+
 ## How It Works
 
 1. Claude Code invokes the hook before executing any bash command

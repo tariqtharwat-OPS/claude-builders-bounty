@@ -48,11 +48,33 @@ test_allow() {
 echo "Testing destructive command blocker..."
 echo ""
 
+# Claude Code PreToolUse protocol responses
+protocol_response=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"rm -r -f /"}}' | bash "$BLOCKER")
+if echo "$protocol_response" | grep -q '"permissionDecision": "deny"'; then
+  echo "✓ Protocol denies destructive Bash command"
+  ((pass_count++))
+else
+  echo "✗ Protocol did not deny destructive Bash command: $protocol_response"
+  ((fail_count++))
+fi
+protocol_response=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"printf hello"}}' | bash "$BLOCKER")
+if echo "$protocol_response" | grep -q '"permissionDecision": "allow"'; then
+  echo "✓ Protocol allows safe Bash command"
+  ((pass_count++))
+else
+  echo "✗ Protocol did not allow safe Bash command: $protocol_response"
+  ((fail_count++))
+fi
+
+test_block "rm -r -f /" "Blocks split rm flags"
+test_block "rm --recursive --force /" "Blocks long rm flags"
+
 # === REQUIRED PATTERNS (from acceptance criteria) ===
 
 # rm -rf patterns
 test_block "rm -rf /" "Blocks rm -rf /"
 test_block "rm -rf *" "Blocks rm -rf *"
+test_allow "rm -rf build" "Allows rm -rf build"
 
 # DROP TABLE
 test_block "DROP TABLE users" "Blocks DROP TABLE"
