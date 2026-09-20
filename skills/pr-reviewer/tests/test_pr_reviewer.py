@@ -100,6 +100,58 @@ def test_security_finding_is_specific_and_docs_example_is_not_code_finding():
     assert "not counted as a code finding" in output
 
 
+def test_wording_based_suppression_cannot_be_used_to_bypass_detection_in_source():
+    # Regression for an exact-SHA audit finding: real source could evade
+    # detection purely by echoing the suppression's own trigger wording
+    # (`password = "hardcoded credential: ..."`) in the added line. There
+    # must be no content string that suppresses a finding in a source file.
+    bypass_attempts = (
+        'password = "hardcoded credential: actual_prod_password_123"',
+        'password="Hardcoded Credential: prod-pass-1"',
+        'password  =  "this is a hardcoded credential for real"',
+        'api_key = "hardcoded credential token abcdefghijkl123456"',
+        'secret = "not a real example, hardcoded credential anyway"',
+    )
+    for line in bypass_attempts:
+        code = patch_for(("app.py",), (line, "return True"))
+        analysis, output = report(metadata(additions=2, deletions=0, changedFiles=1), code)
+        assert analysis["security_flags"], f"bypassed for: {line}"
+        assert not analysis["security_notes"], f"wrongly noted instead of flagged: {line}"
+        assert "❌" in output and "not counted as a code finding" not in output
+
+
+def test_docs_directory_does_not_launder_executable_or_config_files():
+    # Placing real source/config under a docs/ path must not make it
+    # unreviewable: `_is_docs` must classify by extension first, so an
+    # executable or config file cannot borrow documentation's suppression
+    # just by living in a docs/ directory.
+    laundering_attempts = (
+        ("docs/setup.py", 'password = "SuperSecretProdPass1!"'),
+        ("docs/config.yml", 'api_key = "AKIAABCDEFGHIJKLMNOP"'),
+        ("docs/deploy.sh", 'secret = "prod-deploy-secret-value"'),
+        ("docs/settings.env", 'private_key = "-----BEGIN-RSA-PRIVATE-KEY-----"'),
+    )
+    for path, line in laundering_attempts:
+        assert reviewer._is_docs(path) is False, path
+        code = patch_for((path,), (line, "return True"))
+        analysis, output = report(metadata(additions=2, deletions=0, changedFiles=1), code)
+        assert analysis["security_flags"], f"laundered via docs/ path: {path}"
+        assert "❌" in output
+
+
+def test_docs_path_classification_still_covers_genuine_documentation():
+    # Genuine prose documentation (by extension, or extensionless files
+    # under docs/) keeps its example-suppression behavior.
+    genuine_docs = ("docs/security.md", "guide.rst", "notes.adoc", "readme.txt",
+                     "docs/CHANGELOG", "sub/docs/security.mdx")
+    for path in genuine_docs:
+        assert reviewer._is_docs(path) is True, path
+        docs = patch_for((path,), ('password = "example-only"', "Never commit credentials."))
+        analysis, output = report(metadata(additions=2, deletions=0, changedFiles=1), docs)
+        assert not analysis["security_flags"], path
+        assert "not counted as a code finding" in output, path
+
+
 def test_deletion_heavy_patch_is_reviewable_and_reports_actual_counts():
     analysis, output = report(metadata(additions=0, deletions=4, changedFiles=1),
                               patch_for(("old.py",), added=(), deleted=("a", "b", "c", "d")))

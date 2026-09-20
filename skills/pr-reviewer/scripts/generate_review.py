@@ -90,10 +90,33 @@ def load_diff(path: str) -> str:
         raise InputError(f"diff could not be read: {exc}") from exc
 
 
+_DOC_EXTENSIONS = (".md", ".mdx", ".rst", ".adoc", ".txt")
+_CODE_OR_CONFIG_EXTENSIONS = (
+    ".py", ".pyw", ".pyi", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx",
+    ".rb", ".go", ".java", ".kt", ".kts", ".c", ".h", ".hpp", ".cc", ".cpp",
+    ".cs", ".php", ".pl", ".pm", ".sh", ".bash", ".zsh", ".ps1", ".psm1",
+    ".yml", ".yaml", ".json", ".jsonc", ".env", ".ini", ".cfg", ".conf",
+    ".toml", ".xml", ".sql", ".tf", ".tfvars", ".rs", ".swift", ".scala",
+    ".groovy", ".gradle", ".dockerfile", ".mk", ".cmake", ".proto",
+    ".graphql", ".gql", ".properties", ".htaccess",
+)
+
+
 def _is_docs(path: str) -> bool:
+    """Classify a path as documentation by extension first, directory second.
+
+    A recognized code/config extension always wins even under a ``docs/``
+    directory: placing executable source or configuration under ``docs/``
+    must not make its content unreviewable. Only paths with a genuine prose
+    extension, or with no recognized code/config extension at all, are
+    classified as documentation.
+    """
     lower = path.lower()
-    return (lower.endswith((".md", ".mdx", ".rst", ".adoc", ".txt")) or
-            "/docs/" in f"/{lower}" or lower.startswith("docs/"))
+    if lower.endswith(_DOC_EXTENSIONS):
+        return True
+    if lower.endswith(_CODE_OR_CONFIG_EXTENSIONS):
+        return False
+    return "/docs/" in f"/{lower}" or lower.startswith("docs/")
 
 
 def _is_test(path: str) -> bool:
@@ -541,9 +564,6 @@ def analyze_diff(diff_text: str) -> dict:
             continue
         for pattern, label in secret_patterns:
             if re.search(pattern, added):
-                if "hardcoded credential" in added.lower() and "password =" in added.lower():
-                    result["security_notes"].append(f"possible example text in {current}; not treated as a finding")
-                    continue
                 result["security_flags"].append({"file": current, "label": label,
                                                   "line": added[:160]})
     finish_file()
