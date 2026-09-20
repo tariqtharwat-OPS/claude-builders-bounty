@@ -1,0 +1,217 @@
+{
+  "name": "Weekly Dev Summary - GitHub + Claude",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks"
+            }
+          ]
+        }
+      },
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "resource": "repository",
+        "operation": "getMany",
+        "owner": "={{ $json.owner }}",
+        "repository": "={{ $json.repo }}",
+        "returnAll": true
+      },
+      "name": "Get GitHub Issues",
+      "type": "n8n-nodes-base.github",
+      "typeVersion": 1,
+      "position": [460, 300],
+      "credentials": {
+        "githubApi": {
+          "id": "github-creds",
+          "name": "GitHub Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "repository",
+        "operation": "getPullRequests",
+        "owner": "={{ $json.owner }}",
+        "repository": "={{ $json.repo }}",
+        "state": "all",
+        "returnAll": true
+      },
+      "name": "Get GitHub PRs",
+      "type": "n8n-nodes-base.github",
+      "typeVersion": 1,
+      "position": [460, 500],
+      "credentials": {
+        "githubApi": {
+          "id": "github-creds",
+          "name": "GitHub Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "repository",
+        "operation": "getCommits",
+        "owner": "={{ $json.owner }}",
+        "repository": "={{ $json.repo }}",
+        "since": "={{ $now.minus({ weeks: 1 }).toISO() }}",
+        "returnAll": true
+      },
+      "name": "Get GitHub Commits",
+      "type": "n8n-nodes-base.github",
+      "typeVersion": 1,
+      "position": [460, 700],
+      "credentials": {
+        "githubApi": {
+          "id": "github-creds",
+          "name": "GitHub Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "mergeByPosition"
+      },
+      "name": "Merge Data",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [680, 500]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Create a weekly development summary report from the following data:\n\nIssues (last 7 days):\n{{ JSON.stringify($json.issues, null, 2) }}\n\nPull Requests (last 7 days):\n{{ JSON.stringify($json.prs, null, 2) }}\n\nCommits (last 7 days):\n{{ JSON.stringify($json.commits, null, 2) }}\n\nFormat as Markdown with sections:\n## Weekly Development Summary - {{ $now.toFormat('yyyy-MM-dd') }}\n\n### 📊 Overview\n- Total commits: X\n- New issues: Y\n- Merged PRs: Z\n\n### 🔥 Key Changes\n- List top 5 most impactful changes\n\n### 🐛 Bug Fixes\n- Summarize fixed issues\n\n### ✨ New Features\n- Summarize new functionality\n\n### 👀 Code Review Notes\n- Any patterns or concerns\n\n### 📈 Metrics\n- Commit frequency\n- Issue resolution rate",
+        "options": {
+          "temperature": 0.3,
+          "maxTokens": 2000
+        }
+      },
+      "name": "Claude Summary",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1,
+      "position": [900, 500],
+      "credentials": {
+        "anthropicApi": {
+          "id": "claude-creds",
+          "name": "Claude API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "subject": "=Weekly Dev Summary - {{ $json.repo }} - {{ $now.toFormat('yyyy-MM-dd') }}",
+        "html": "={{ $json.content }}",
+        "toEmail": "={{ $json.recipient_email }}",
+        "options": {}
+      },
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [1120, 500],
+      "credentials": {
+        "smtp": {
+          "id": "email-creds",
+          "name": "SMTP Account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get GitHub Issues",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get GitHub PRs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get GitHub Commits",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get GitHub Issues": {
+      "main": [
+        [
+          {
+            "node": "Merge Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get GitHub PRs": {
+      "main": [
+        [
+          {
+            "node": "Merge Data",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Get GitHub Commits": {
+      "main": [
+        [
+          {
+            "node": "Merge Data",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Merge Data": {
+      "main": [
+        [
+          {
+            "node": "Claude Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude Summary": {
+      "main": [
+        [
+          {
+            "node": "Send Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler-workflow-id"
+  },
+  "staticData": null,
+  "pinData": {},
+  "versionId": "1",
+  "meta": {
+    "instanceId": "bounty-submission"
+  }
+}
