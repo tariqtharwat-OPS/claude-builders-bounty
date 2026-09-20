@@ -433,16 +433,16 @@ def test_rejected_diff_cli_exits_nonzero_with_a_rejection_report(tmp_path):
     assert "Traceback" not in result.stderr
 
 
-def test_committed_real_output_fixtures_match_current_report_contract():
-    empty = reviewer.finalize_analysis(reviewer.analyze_diff(""), "")
-    expected_empty = reviewer.generate_report({"title": "Authorship and follow-up"}, empty)
-    assert expected_empty == (Path(__file__).parent / "real_outputs" / "cli-14481.md").read_text()
-
-    current = (Path(__file__).parent / "real_outputs" / "cli-14478.md").read_text()
-    assert "**Diff evidence:** 2 file(s), +141/-1 lines" in current
-    assert "**Confidence:** Medium" in current
-    assert "This change touches" not in current
-    assert "Overall assessment:** ✅ Looks good with minor suggestions" in current
+def test_committed_real_output_fixtures_match_current_report_exactly():
+    inputs = Path(__file__).parent / "real_inputs"
+    outputs = Path(__file__).parent / "real_outputs"
+    for fixture in sorted(outputs.glob("cli-*.md")):
+        stem = fixture.stem
+        metadata = reviewer.load_metadata(str(inputs / f"{stem}.json"))
+        diff = reviewer.load_diff(str(inputs / f"{stem}.patch"))
+        analysis = reviewer.finalize_analysis(reviewer.analyze_diff(diff), diff)
+        expected = reviewer.generate_report(metadata, analysis)
+        assert expected == fixture.read_text(encoding="utf-8"), stem
 
 
 def test_evidence_binding_is_emitted_verbatim():
