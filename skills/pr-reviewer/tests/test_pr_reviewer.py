@@ -159,6 +159,45 @@ def test_binary_marker_cannot_be_followed_by_textual_hunks():
     assert "unsafe input" in output
 
 
+def test_binary_states_are_explicit_and_never_claim_complete_security_review():
+    binary = ("diff --git a/assets/logo.png b/assets/logo.png\n"
+              "index 1111111..2222222 100644\n"
+              "Binary files a/assets/logo.png and b/assets/logo.png differ\n")
+    analysis, output = report(metadata(additions=0, deletions=0, changedFiles=1), binary)
+    assert analysis["input_state"] == "limited"
+    assert analysis["binary_files"] == ["assets/logo.png"]
+    assert analysis["reviewable"] is False
+    assert "content is uninspectable" in output
+    assert "No security analysis performed" in output
+
+    mixed = binary + patch_for(("src/app.py",), added=("safe = True", "return safe"))
+    analysis, output = report(metadata(additions=2, deletions=0, changedFiles=2), mixed)
+    assert analysis["input_state"] == "limited"
+    assert analysis["reviewable"] is True
+    assert "Limited review" in output
+    assert "**Confidence:** Low" in output
+    assert "no security conclusion is made" in output
+    assert "assets/logo.png" in output
+
+
+def test_binary_evidence_gate_survives_derived_state_mutation():
+    """A forged/older derived state must not erase binary uncertainty."""
+    patch = patch_for(("src/app.py", "tests/test_app.py"),
+                      added=tuple(f"assert result == expected {i}" for i in range(12)))
+    analysis, _ = report(metadata(additions=24, deletions=0, changedFiles=2), patch)
+    assert reviewer.confidence_level(analysis, []) == "High"
+
+    # Simulate a caller or mutation that marks the aggregate valid while
+    # retaining the authoritative uninspected-file evidence.
+    analysis["input_state"] = "valid"
+    analysis["binary_files"] = ["assets/logo.png"]
+    assert reviewer.confidence_level(analysis, []) == "Low"
+    output = reviewer.generate_report(metadata(additions=24, deletions=0, changedFiles=2), analysis)
+    assert "**Confidence:** High" not in output
+    assert "Limited review" in output
+    assert "no security conclusion is made" in output
+
+
 def test_duplicate_headers_and_traversal_paths_are_not_reviewable():
     duplicate = ("diff --git a/app.py b/app.py\n--- a/app.py\n--- a/app.py\n"
                  "+++ b/app.py\n@@ -1,1 +1,2 @@\n-old\n+new\n+more\n")
@@ -169,6 +208,74 @@ def test_duplicate_headers_and_traversal_paths_are_not_reviewable():
         assert analysis["malformed"] is True
         assert analysis["reviewable"] is False
         assert "unsafe input" in output
+
+
+def test_generated_path_cases_reject_traversal_and_noncanonical_forms():
+    invalid = ("../x.py", "src/../../x.py", "/tmp/x.py", "src/./x.py",
+               "src//x.py", "src\\x.py", "src/\tx.py", "src/\x7fx.py", ".", "..")
+    for path in invalid:
+        assert reviewer._is_safe_patch_path(path) is False
+        patch_text = (f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+                      "@@ -0,0 +1,2 @@\n+one\n+two\n")
+        analysis, output = report(metadata(additions=2, deletions=0, changedFiles=1), patch_text)
+        assert analysis["input_state"] == "rejected", path
+        assert analysis["reviewable"] is False, path
+        assert path not in analysis["files_changed"]
+        assert "Rejected review" in output
+
+    for path in ("x.py", "src/x.py", "path with spaces/file.py", "vendor/pkg/x.js"):
+        assert reviewer._is_safe_patch_path(path) is True
+
+
+def test_header_pairing_and_repeated_sections_fail_closed():
+    prefix = "diff --git a/app.py b/app.py\n"
+    hunk = "@@ -1,1 +1,2 @@\n-old\n+new\n+more\n"
+    malformed = (
+        prefix + "+++ b/app.py\n--- a/app.py\n" + hunk,
+        prefix + "--- a/app.py\n+++ b/other.py\n" + hunk,
+        prefix + "--- a/app.py\n+++ b/app.py\n+++ b/app.py\n" + hunk,
+        prefix + "--- /dev/null\n+++ /dev/null\n" + hunk,
+        prefix + "--- a/app.py\n+++ b/app.py\n" + hunk +
+        prefix + "--- a/app.py\n+++ b/app.py\n" + hunk,
+        prefix + "--- a/app.py\n+++ b/app.py\n@@ malformed @@\n+new\n",
+    )
+    for patch_text in malformed:
+        analysis, output = report(metadata(), patch_text)
+        assert analysis["input_state"] == "rejected"
+        assert analysis["reviewable"] is False
+        assert "Rejected review" in output
+
+
+def test_valid_patch_classes_remain_reviewable():
+    cases = [
+        (patch_for(("src/a.py",), added=("one", "two")), {"has_docs": False}),
+        (patch_for(("src/a.py", "src/b.py"), added=("one", "two")), {}),
+        (patch_for(("src/a.py",), added=("new", "more"), deleted=("old",)), {}),
+        (patch_for(("src/old.py",), added=(), deleted=("a", "b")), {}),
+        (patch_for(("docs/guide.md",), added=("intro", "details")), {"has_docs": True}),
+        (patch_for(("vendor/pkg/generated.min.js",), added=("min", "data")),
+         {"generated_files": ["vendor/pkg/generated.min.js"]}),
+    ]
+    for patch_text, expected in cases:
+        additions = sum(1 for line in patch_text.splitlines() if line.startswith("+") and not line.startswith("+++"))
+        deletions = sum(1 for line in patch_text.splitlines() if line.startswith("-") and not line.startswith("---"))
+        files = patch_text.count("diff --git ")
+        analysis, _ = report(metadata(additions=additions, deletions=deletions,
+                                      changedFiles=files), patch_text)
+        assert analysis["reviewable"] is True
+        assert analysis["malformed"] is False
+        for key, value in expected.items():
+            assert analysis[key] == value
+
+
+def test_standard_git_quoted_unicode_path_is_decoded_and_validated():
+    patch_text = ('diff --git "a/caf\\303\\251.py" "b/caf\\303\\251.py"\n'
+                  '--- "a/caf\\303\\251.py"\n'
+                  '+++ "b/caf\\303\\251.py"\n'
+                  '@@ -0,0 +1,2 @@\n+one\n+two\n')
+    analysis, _ = report(metadata(additions=2, deletions=0, changedFiles=1), patch_text)
+    assert analysis["reviewable"] is True
+    assert analysis["files_changed"] == ["café.py"]
 
 
 def test_high_confidence_requires_meaningful_test_coverage_evidence():
@@ -254,6 +361,39 @@ def test_cli_reports_inaccessible_or_malformed_inputs_without_traceback(tmp_path
                              "--diff", str(tmp_path / "missing.patch")], capture_output=True, text=True)
     assert result.returncode == 2
     assert "metadata must be a JSON object" in result.stderr
+
+    malformed = tmp_path / "malformed.json"
+    malformed.write_text("{not-json", encoding="utf-8")
+    valid_diff = tmp_path / "valid.patch"
+    valid_diff.write_text(patch_for(("src/a.py",)), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(SCRIPT), "--metadata", str(malformed),
+                             "--diff", str(valid_diff)], capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "PR review unavailable" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_empty_and_partial_metadata_are_explicitly_limited():
+    patch_text = patch_for(("src/a.py",), added=("one", "two"))
+    for meta in ({}, {"title": "Partial"}, {"title": "Partial", "additions": 2}):
+        analysis, output = report(meta, patch_text)
+        assert analysis["reviewable"] is True
+        assert "Review status:** Limited" in output
+        assert "**Confidence:** Low" in output
+        assert "Uncertainty" in output
+
+
+def test_rejected_diff_cli_exits_nonzero_with_a_rejection_report(tmp_path):
+    meta = tmp_path / "metadata.json"
+    patch_path = tmp_path / "unsafe.patch"
+    meta.write_text(json.dumps(metadata(additions=2, deletions=0, changedFiles=1)), encoding="utf-8")
+    patch_path.write_text("diff --git a/../x.py b/../x.py\n--- a/../x.py\n+++ b/../x.py\n"
+                          "@@ -0,0 +1,2 @@\n+one\n+two\n", encoding="utf-8")
+    result = subprocess.run([sys.executable, str(SCRIPT), "--metadata", str(meta),
+                             "--diff", str(patch_path)], capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "Rejected review" in result.stdout
+    assert "Traceback" not in result.stderr
 
 
 def test_evidence_binding_is_emitted_verbatim():

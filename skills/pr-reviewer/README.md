@@ -33,13 +33,24 @@ jobs:
 
 The CLI accepts a real GitHub PR URL, fetches metadata and the diff with `gh` when available or GitHub's unauthenticated API, and writes the review without posting anything:
 
+Requirements: Python 3.10 or newer. The CLI has no third-party Python dependencies. An authenticated `gh` installation is optional but recommended to avoid GitHub's low unauthenticated API rate limit.
+
 ```bash
 python skills/pr-reviewer/scripts/generate_review.py \\
   --pr https://github.com/owner/repo/pull/123 \\
   --output report.md
 ```
 
-Run the command from the repository root (the path above is root-relative). It uses `gh` when available and otherwise reads public PR metadata/diffs through GitHub's unauthenticated API; no token or secret is written to reports. Invalid or inaccessible PRs and malformed local inputs fail cleanly without a traceback. The patch is authoritative for changed files and line counts; every unified-diff hunk must have matching declared and observed old/new line counts and reviewable text patches must include matching `---`/`+++` headers. Missing or mismatched metadata is called out as uncertainty, never silently treated as fact. Empty, one-line/trivial, malformed, and binary-only diffs produce an explicit no-review result rather than a polished normal review.
+Run the command from the repository root (the path above is root-relative). It uses `gh` when available and otherwise reads public PR metadata/diffs through GitHub's unauthenticated API; no token or secret is written to reports. Invalid or inaccessible PRs and malformed local inputs fail cleanly without a traceback. The patch is authoritative for changed files and line counts; every unified-diff hunk must have matching declared and observed old/new line counts and reviewable text patches must include matching, canonical `---`/`+++` paths.
+
+The report deliberately distinguishes four input states:
+
+- **Valid:** structurally complete textual changes produce a grounded review.
+- **Insufficient:** empty or trivial changes produce an explicit no-review result.
+- **Limited:** binary/uninspectable files or incomplete metadata are named explicitly, confidence is Low, and no security conclusion is made for uninspected content. A binary-only patch does not receive a normal review.
+- **Rejected:** unsafe paths, conflicting/duplicate headers, malformed hunks, repeated file sections, or binary/text structure mixed within one file produce a rejection report and exit status 2.
+
+Missing or mismatched metadata is always surfaced as uncertainty rather than silently treated as fact. Binary files can coexist with valid textual files, but every uninspectable path is listed and the result remains a limited review requiring manual inspection.
 
 For offline/reproducible runs, metadata and diff files are also supported. Capture those inputs from the public PR at a pinned revision and commit only sanitized fixtures; never commit credentials:
 

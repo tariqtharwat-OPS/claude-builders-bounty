@@ -7,7 +7,9 @@ optional context and is never allowed to manufacture findings or certainty.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
+import posixpath
 import re
 import subprocess
 import sys
@@ -21,15 +23,19 @@ class InputError(ValueError):
     """An input cannot be reviewed safely."""
 
 
+def _require_metadata_object(value) -> dict:
+    if not isinstance(value, dict):
+        raise InputError("metadata must be a JSON object")
+    return value
+
+
 def load_metadata(path: str) -> dict:
     try:
         with open(path, encoding="utf-8") as handle:
             value = json.load(handle)
     except (OSError, json.JSONDecodeError) as exc:
         raise InputError(f"metadata could not be read: {exc}") from exc
-    if not isinstance(value, dict):
-        raise InputError("metadata must be a JSON object")
-    return value
+    return _require_metadata_object(value)
 
 
 def fetch_pr(url: str) -> tuple[dict, str]:
@@ -40,22 +46,27 @@ def fetch_pr(url: str) -> tuple[dict, str]:
     owner, repo, number = match.groups()
     target = f"{owner}/{repo}"
     try:
-        metadata = json.loads(subprocess.check_output(
+        metadata = _require_metadata_object(json.loads(subprocess.check_output(
             ["gh", "pr", "view", number, "--repo", target,
              "--json", "title,body,files,additions,deletions,changedFiles"],
-            text=True, stderr=subprocess.PIPE))
+            text=True, stderr=subprocess.PIPE)))
         diff = subprocess.check_output(["gh", "pr", "diff", number, "--repo", target],
                                        text=True, stderr=subprocess.PIPE)
+        if not isinstance(diff, str):
+            raise InputError("GitHub CLI returned a non-text diff")
         return metadata, diff
-    except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError):
+    except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError,
+            UnicodeError):
         api = f"https://api.github.com/repos/{target}/pulls/{number}"
         try:
             def get_json(endpoint):
                 request = Request(endpoint, headers={"Accept": "application/vnd.github+json"})
                 with urlopen(request, timeout=20) as response:
                     return json.load(response)
-            raw = get_json(api)
+            raw = _require_metadata_object(get_json(api))
             files = get_json(api + "/files?per_page=100")
+            if not isinstance(files, list):
+                raise InputError("GitHub API returned invalid file metadata")
             metadata = {"title": raw.get("title", ""), "body": raw.get("body", ""),
                         "files": files, "additions": raw.get("additions"),
                         "deletions": raw.get("deletions"),
@@ -74,7 +85,7 @@ def fetch_pr(url: str) -> tuple[dict, str]:
 def load_diff(path: str) -> str:
     try:
         return Path(path).read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise InputError(f"diff could not be read: {exc}") from exc
 
 
@@ -101,19 +112,64 @@ _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?:.*)$")
 
 
 def _is_safe_patch_path(path: str) -> bool:
-    """Accept only relative, repository-local POSIX paths from a patch."""
-    if not path or path.startswith("/") or "\x00" in path or "\\" in path:
+    """Accept only canonical, relative, repository-local POSIX paths."""
+    if (not isinstance(path, str) or not path or path.startswith("/") or
+            "\\" in path or any(ord(char) < 32 or ord(char) == 127 for char in path)):
         return False
-    return ".." not in Path(path).parts
+    normalized = posixpath.normpath(path)
+    if normalized in (".", "..") or normalized != path:
+        return False
+    return ".." not in path.split("/")
+
+
+_QUOTED_GIT_PATH = r'"(?:\\.|[^"\\])*"'
+
+
+def _decode_git_path(token: str) -> str | None:
+    """Decode Git's C-quoted UTF-8 path representation."""
+    if not token.startswith('"'):
+        return token
+    try:
+        decoded = ast.literal_eval(token)
+        if not isinstance(decoded, str):
+            return None
+        return decoded.encode("latin-1").decode("utf-8")
+    except (SyntaxError, ValueError, UnicodeError):
+        return None
+
+
+def _diff_paths(header: str) -> tuple[str, str] | None:
+    """Extract the two paths from a conventional git diff header.
+
+    Git leaves ordinary spaces unquoted, so the separator is the final `` b/``.
+    More exotic quoted names are rejected rather than decoded incorrectly.
+    """
+    quoted = re.fullmatch(
+        rf"diff --git ({_QUOTED_GIT_PATH}) ({_QUOTED_GIT_PATH})", header)
+    if quoted:
+        old_token = _decode_git_path(quoted.group(1))
+        new_token = _decode_git_path(quoted.group(2))
+        if not old_token or not new_token:
+            return None
+        if not old_token.startswith("a/") or not new_token.startswith("b/"):
+            return None
+        return old_token[2:], new_token[2:]
+    match = re.fullmatch(r"diff --git a/(.+) b/(.+)", header)
+    return (match.group(1), match.group(2)) if match else None
 
 
 def _path_from_header(value: str, prefix: str) -> str | None:
     """Return a conventional ---/+++ path, or None for an invalid header."""
     if value == "/dev/null":
         return value
+    quoted = re.fullmatch(rf"({_QUOTED_GIT_PATH})(?:\t.*)?", value)
+    if quoted:
+        value = _decode_git_path(quoted.group(1)) or ""
+    else:
+        value = value.split("\t", 1)[0]
     if not value.startswith(prefix):
         return None
-    path = value[len(prefix):].split("\t", 1)[0]
+    path = value[len(prefix):]
     return path if path and _is_safe_patch_path(path) else None
 
 
@@ -124,14 +180,17 @@ def analyze_diff(diff_text: str) -> dict:
     match both counts in its header. This rejects truncated or hand-edited
     patches instead of reviewing a misleading prefix.
     """
-    result = {"files_changed": [], "file_status": {}, "total_additions": 0,
-              "total_deletions": 0, "security_flags": [], "security_notes": [],
-              "has_tests": False, "has_test_evidence": False, "has_docs": False, "generated_files": [],
-              "malformed": False, "parse_warnings": [], "reviewable": False,
+    result = {"files_changed": [], "text_files": [], "binary_files": [],
+              "file_status": {}, "total_additions": 0, "total_deletions": 0,
+              "security_flags": [], "security_notes": [], "has_tests": False,
+              "has_test_evidence": False, "has_docs": False,
+              "generated_files": [], "malformed": False, "parse_warnings": [],
+              "reviewable": False, "input_state": "unclassified",
               "trivial_reason": "", "total_changed_lines": 0}
     current = None
     current_state = None
     hunk = None
+    seen_destinations = set()
     secret_patterns = [
         (r"(?i)\b(password|passwd|secret|api[_-]?key|private[_-]?key)\s*[:=]\s*['\"][^'\"]+['\"]", "Hardcoded credential"),
         (r"(?i)\b(token|access_token)\s*[:=]\s*['\"][A-Za-z0-9_./+=-]{12,}['\"]", "Hardcoded access token"),
@@ -155,35 +214,56 @@ def analyze_diff(diff_text: str) -> dict:
     def finish_file() -> None:
         nonlocal current, current_state
         finish_hunk()
-        if current_state is not None and not current_state["binary"]:
-            if not current_state["old_header"] or not current_state["new_header"]:
-                warn(f"text patch for {current or 'unknown file'} lacks ---/+++ headers")
-            if (current_state["old_path"] == "/dev/null" and
-                    current_state["new_path"] == "/dev/null"):
-                warn(f"text patch for {current or 'unknown file'} has no file side")
-            if not current_state["saw_hunk"]:
-                warn(f"text patch for {current or 'unknown file'} has no hunk")
+        if current_state is not None:
+            if current_state["binary"]:
+                if (current_state["old_header"] or current_state["new_header"] or
+                        current_state["saw_hunk"]):
+                    warn(f"binary patch for {current or 'unknown file'} also contains text structure")
+                if current_state["safe"] and current not in result["binary_files"]:
+                    result["binary_files"].append(current)
+            else:
+                if not current_state["old_header"] or not current_state["new_header"]:
+                    warn(f"text patch for {current or 'unknown file'} lacks ---/+++ headers")
+                if (current_state["old_path"] == "/dev/null" and
+                        current_state["new_path"] == "/dev/null"):
+                    warn(f"text patch for {current or 'unknown file'} has no file side")
+                if not current_state["saw_hunk"]:
+                    warn(f"text patch for {current or 'unknown file'} has no hunk")
+                if current_state["safe"] and current not in result["text_files"]:
+                    result["text_files"].append(current)
         current = None
         current_state = None
 
     for raw in diff_text.splitlines():
         if raw.startswith("diff --git "):
             finish_file()
-            match = re.match(r"diff --git a/(.+) b/(.+)$", raw)
-            current = match.group(2) if match else None
+            paths = _diff_paths(raw)
+            current = paths[1] if paths else None
+            safe = bool(paths and _is_safe_patch_path(paths[0]) and
+                        _is_safe_patch_path(paths[1]))
             current_state = {"old_header": False, "new_header": False,
                              "old_path": None, "new_path": None,
                              "saw_hunk": False, "binary": False,
-                             "old_diff": match.group(1) if match else None,
-                             "new_diff": match.group(2) if match else None}
-            if not match:
+                             "safe": safe,
+                             "old_diff": paths[0] if paths else None,
+                             "new_diff": paths[1] if paths else None}
+            if not paths:
                 warn("an unreadable diff header was found")
-            elif (not _is_safe_patch_path(match.group(1)) or
-                  not _is_safe_patch_path(match.group(2))):
-                warn(f"unsafe traversal path in diff header: {current}")
-            elif current not in result["files_changed"]:
+            elif not safe:
+                warn("an unsafe or non-canonical path was found in a diff header")
+            elif current in seen_destinations:
+                warn(f"repeated or ambiguous file section for {current}")
+            else:
+                seen_destinations.add(current)
                 result["files_changed"].append(current)
                 result["file_status"][current] = "modified"
+                if _is_test(current):
+                    result["has_tests"] = True
+                if _is_docs(current):
+                    result["has_docs"] = True
+                if (_is_generated_or_vendor(current) and
+                        current not in result["generated_files"]):
+                    result["generated_files"].append(current)
             continue
 
         if current_state is None:
@@ -192,6 +272,8 @@ def analyze_diff(diff_text: str) -> dict:
             continue
 
         if raw.startswith("--- ") and hunk is None:
+            if current_state["binary"] or current_state["new_header"]:
+                warn(f"unexpected --- header transition in {current or 'unknown file'}")
             path = _path_from_header(raw[4:], "a/")
             if path is None:
                 warn(f"invalid --- header in {current}")
@@ -203,10 +285,12 @@ def analyze_diff(diff_text: str) -> dict:
                     warn(f"--- header path does not match diff header in {current}")
                 current_state["old_path"] = path
                 current_state["old_header"] = True
-                if path == "/dev/null":
+                if path == "/dev/null" and current_state["safe"]:
                     result["file_status"][current] = "added"
             continue
         if raw.startswith("+++ ") and hunk is None:
+            if current_state["binary"] or not current_state["old_header"]:
+                warn(f"unexpected +++ header transition in {current or 'unknown file'}")
             path = _path_from_header(raw[4:], "b/")
             if path is None:
                 warn(f"invalid +++ header in {current}")
@@ -218,17 +302,31 @@ def analyze_diff(diff_text: str) -> dict:
                     warn(f"+++ header path does not match diff header in {current}")
                 current_state["new_path"] = path
                 current_state["new_header"] = True
-                if path == "/dev/null":
+                if path == "/dev/null" and current_state["safe"]:
                     result["file_status"][current] = "deleted"
             continue
         if raw.startswith(("Binary files ", "GIT binary patch")):
             finish_hunk()
+            if current_state["binary"]:
+                warn(f"duplicate binary marker in {current or 'unknown file'}")
+            if (current_state["old_header"] or current_state["new_header"] or
+                    current_state["saw_hunk"]):
+                warn(f"binary marker conflicts with text structure in {current or 'unknown file'}")
+            if raw.startswith("Binary files "):
+                marker = re.fullmatch(r"Binary files a/(.+) and b/(.+) differ", raw)
+                if (not marker or not current_state["safe"] or
+                        marker.group(1) != current_state["old_diff"] or
+                        marker.group(2) != current_state["new_diff"]):
+                    warn(f"binary marker paths do not match the diff header in {current or 'unknown file'}")
             current_state["binary"] = True
             result["parse_warnings"].append(f"binary content in {current} was not line-inspected")
             continue
         if raw.startswith("@@"):
             if current_state["binary"]:
                 warn(f"binary marker followed by textual hunk in {current}")
+                continue
+            if not current_state["old_header"] or not current_state["new_header"]:
+                warn(f"hunk appeared before a complete header pair in {current or 'unknown file'}")
             finish_hunk()
             match = _HUNK_RE.match(raw)
             if not match:
@@ -240,7 +338,22 @@ def analyze_diff(diff_text: str) -> dict:
             current_state["saw_hunk"] = True
             continue
         if hunk is None:
-            if raw.startswith(("index ", "old mode ", "new mode ", "similarity ", "rename ", "copy ")):
+            if current_state["binary"]:
+                # A GIT binary patch payload is intentionally opaque. It is
+                # represented as an uninspectable file and can never support a
+                # complete security conclusion.
+                continue
+            if raw.startswith(("index ", "old mode ", "new mode ",
+                               "new file mode ", "deleted file mode ",
+                               "similarity index ", "dissimilarity index ")):
+                continue
+            transition = next((prefix for prefix in
+                               ("rename from ", "rename to ", "copy from ", "copy to ")
+                               if raw.startswith(prefix)), None)
+            if transition:
+                transition_path = raw[len(transition):]
+                if not _is_safe_patch_path(transition_path):
+                    warn(f"unsafe path in {transition.strip()} metadata")
                 continue
             if raw.strip():
                 warn(f"unexpected content outside hunk in {current}")
@@ -262,8 +375,8 @@ def analyze_diff(diff_text: str) -> dict:
         # The only remaining valid hunk marker is '+'.
         result["total_additions"] += 1
         hunk["new_seen"] += 1
-        if not current:
-            warn("addition has no file path")
+        if not current or not current_state["safe"]:
+            warn("addition has no safe file path")
             continue
         added = raw[1:].strip()
         if _is_test(current):
@@ -291,16 +404,27 @@ def analyze_diff(diff_text: str) -> dict:
 def finalize_analysis(analysis: dict, diff_text: str) -> dict:
     changed = analysis["total_additions"] + analysis["total_deletions"]
     analysis["total_changed_lines"] = changed
-    if not diff_text.strip():
+    if analysis["malformed"]:
+        analysis["input_state"] = "rejected"
+        analysis["trivial_reason"] = "the diff is malformed or structurally ambiguous"
+    elif not diff_text.strip():
+        analysis["input_state"] = "insufficient"
         analysis["trivial_reason"] = "the diff is empty"
     elif not analysis["files_changed"]:
+        analysis["input_state"] = "insufficient"
         analysis["trivial_reason"] = "the diff contains no changed files"
-    elif analysis["malformed"] or changed == 0:
-        analysis["trivial_reason"] = "the diff is malformed or contains no substantive lines"
+    elif analysis["binary_files"] and not analysis["text_files"]:
+        analysis["input_state"] = "limited"
+        analysis["trivial_reason"] = "all changed files are binary or otherwise uninspectable"
+    elif changed == 0:
+        analysis["input_state"] = "insufficient"
+        analysis["trivial_reason"] = "the diff contains no substantive text lines"
     elif changed <= 1 or (analysis["total_additions"] == 1 and analysis["total_deletions"] == 1):
+        analysis["input_state"] = "insufficient"
         analysis["trivial_reason"] = "the diff contains only a trivial one-line change"
     else:
         analysis["reviewable"] = True
+        analysis["input_state"] = "limited" if analysis["binary_files"] else "valid"
     return analysis
 
 
@@ -324,9 +448,14 @@ def _metadata_context(metadata: dict, analysis: dict) -> tuple[str, list[str]]:
 
 def confidence_level(analysis: dict, uncertainties: list[str]) -> str:
     """Apply semantic gates; High is possible only with complete evidence."""
+    # Keep this gate on the evidence field itself, not only on the derived
+    # input_state.  Callers/tests may pass an analysis assembled or mutated
+    # independently of finalize_analysis; binary content is never inspected
+    # and therefore can never support High confidence.
+    if analysis.get("binary_files") or analysis.get("input_state") != "valid" or uncertainties:
+        return "Low"
     if (analysis["security_flags"] or analysis["generated_files"] or
-            uncertainties or not analysis["has_tests"] or
-            not analysis["has_test_evidence"]):
+            not analysis["has_tests"] or not analysis["has_test_evidence"]):
         return "Low" if analysis["security_flags"] or analysis["generated_files"] else "Medium"
     if (analysis["total_additions"] + analysis["total_deletions"] >= 20 and
             len(analysis["files_changed"]) >= 2):
@@ -342,7 +471,12 @@ def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None =
     metadata_uncertainty, uncertainties = _metadata_context(metadata, diff_analysis)
     if not diff_analysis["reviewable"]:
         reason = diff_analysis["trivial_reason"] or "insufficient diff evidence"
-        status = "No review — insufficient input" if "malformed" not in reason else "No review — unsafe input"
+        if diff_analysis.get("input_state") == "rejected":
+            status = "Rejected review — unsafe or ambiguous input"
+        elif diff_analysis.get("input_state") == "limited":
+            status = "Limited review — content is uninspectable"
+        else:
+            status = "No review — insufficient input"
         lines = ["## PR Review Report", "", "### 📋 Summary", f"- **PR:** {title}",
                  f"- **Review status:** ⏸️ {status} ({reason}).",
                  "- **Overall assessment:** No review performed; the patch is not sufficient for a grounded review.",
@@ -351,10 +485,19 @@ def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None =
                  "- No security analysis performed.", "", "### 🧪 Tests", "- No review performed.", "",
                  "### 📖 Documentation", "- No review performed.", "", "### 💡 Suggestions",
                  "1. Provide a complete, substantive unified diff and valid PR metadata.", ""]
+        if diff_analysis["binary_files"]:
+            lines.insert(6, "- **Uninspectable files:** " + ", ".join(
+                f"`{path}`" for path in diff_analysis["binary_files"]))
+        if diff_analysis.get("input_state") == "rejected" and diff_analysis["parse_warnings"]:
+            lines.insert(6, "- **Validation failure:** " + "; ".join(diff_analysis["parse_warnings"][:3]))
         return "\n".join(lines)
 
     issues = len(diff_analysis["security_flags"])
-    if issues > 2:
+    limited = (diff_analysis.get("input_state") == "limited" or
+               bool(diff_analysis.get("binary_files")) or bool(uncertainties))
+    if limited:
+        assessment = "⚠️ Limited review — manual inspection required"
+    elif issues > 2:
         assessment = "🚫 Needs significant revision"
     elif issues or not diff_analysis["has_tests"]:
         assessment = "⚠️ Needs revision before merge"
@@ -364,6 +507,14 @@ def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None =
     lines = ["## PR Review Report", "", "### 📋 Summary", f"- **PR:** {title}",
              f"- **Diff evidence:** {changed} file(s), +{additions}/-{deletions} lines (from the patch).",
              f"- **Overall assessment:** {assessment}", f"- **Confidence:** {confidence}", ""]
+    if limited:
+        limitations = []
+        if diff_analysis["binary_files"]:
+            limitations.append("uninspectable binary files: " + ", ".join(
+                f"`{path}`" for path in diff_analysis["binary_files"]))
+        if metadata_uncertainty:
+            limitations.append(metadata_uncertainty)
+        lines.append("- **Review status:** Limited — " + "; ".join(limitations) + ".")
     if metadata_uncertainty:
         lines.append(f"- **Uncertainty:** {metadata_uncertainty}.")
     lines += ["", "### ✅ Code Quality"]
@@ -378,7 +529,10 @@ def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None =
     if diff_analysis["security_flags"]:
         lines.extend(f"- ❌ **{f['label']}** in `{f['file']}`: `{f['line']}`" for f in diff_analysis["security_flags"])
     else:
-        lines.append("- ✅ No high-confidence risky patterns found in added non-documentation lines.")
+        qualifier = "inspected textual additions" if diff_analysis["binary_files"] else "added non-documentation lines"
+        lines.append(f"- ✅ No high-confidence risky patterns found in {qualifier}.")
+    if diff_analysis["binary_files"]:
+        lines.append("- ⚠️ Binary content was not inspected; no security conclusion is made for those files.")
     for note in diff_analysis["security_notes"]:
         lines.append(f"- ℹ️ {note} (not counted as a code finding).")
     lines += ["", "### 🧪 Tests", "- ✅ Test files are included in the patch." if diff_analysis["has_tests"] else "- ⚠️ No test files detected in the patch.",
@@ -387,6 +541,7 @@ def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None =
     suggestions = []
     if not diff_analysis["has_tests"]: suggestions.append("Add tests for changed behavior and failure paths.")
     if issues: suggestions.append("Resolve the security finding(s) above and verify with focused tests.")
+    if diff_analysis["binary_files"]: suggestions.append("Inspect every binary file with an appropriate binary-aware tool before merge.")
     if changed > 10 or additions > 300: suggestions.append("Split or independently verify the largest change surfaces.")
     if not suggestions: suggestions.append("Confirm the patch behavior with project checks before merge.")
     lines.extend(f"{i}. {item}" for i, item in enumerate(suggestions, 1))
@@ -430,7 +585,7 @@ def main() -> int:
             print(f"Written {args.output}")
         else:
             print(report)
-        return 0
+        return 2 if analysis.get("input_state") == "rejected" else 0
     except InputError as exc:
         print(f"PR review unavailable: {exc}", file=sys.stderr)
         return 2
