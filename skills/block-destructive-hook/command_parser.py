@@ -78,12 +78,13 @@ def tokenize(text: str) -> list[list[Token]]:
 
 
 def shell_substitutions(text: str) -> list[str]:
-    """Return commands executed by $(...) and backtick substitutions.
+    """Return commands executed by shell substitution constructs.
 
     This intentionally understands only the quoting needed to distinguish shell
     syntax from literal documentation.  In particular, substitutions in single
     quotes (and escaped substitutions) are data, while substitutions in double
-    quotes still execute.
+    quotes still execute. Process substitutions ``<(...)`` and ``>(...)`` are
+    included because Bash evaluates their bodies before the surrounding command.
     """
     found: list[str] = []
     i = 0
@@ -103,7 +104,7 @@ def shell_substitutions(text: str) -> list[str]:
                 quote = None
                 i += 1
                 continue
-            if text.startswith("$(", i):
+            if text.startswith(("$(", "<(", ">("), i):
                 body, end = _parenthesized_substitution(text, i + 2)
                 if body is not None:
                     found.append(body)
@@ -122,7 +123,7 @@ def shell_substitutions(text: str) -> list[str]:
             i += 1
         elif ch == "\\":
             i += 2
-        elif text.startswith("$(", i):
+        elif text.startswith(("$(", "<(", ">("), i):
             body, end = _parenthesized_substitution(text, i + 2)
             if body is not None:
                 found.append(body)
