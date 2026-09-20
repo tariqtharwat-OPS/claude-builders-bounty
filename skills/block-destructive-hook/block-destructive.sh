@@ -41,6 +41,11 @@ is_destructive() {
     return 0
   fi
 
+  # Never permit removal of sensitive absolute system paths, including without flags.
+  if printf '%s' "$rm_candidate" | grep -qiE '(^|[^[:alnum:]_])rm([[:space:]]+(-[[:alnum:]]+|--[[:alnum:]-]+|--))*[[:space:]]+(/|/\*|/(var|etc|usr|bin|sbin|home|Users|System|Library)(/|$))([[:space:];|&]|$)'; then
+    return 0
+  fi
+
   # Shutdown commands must be command words, not harmless prose/arguments.
   if printf '%s' "$normalized" | grep -qiE '(^|[;|&])[[:space:]]*(sudo[[:space:]]+)?(halt|shutdown)([[:space:]]|$)'; then
     return 0
