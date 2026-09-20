@@ -20,8 +20,10 @@ inputs:
 outputs:
   report_path:
     description: 'Path to the generated review report'
+    value: ${{ steps.review.outputs.report_path }}
   report_summary:
     description: 'One-line summary of the review'
+    value: ${{ steps.review.outputs.report_summary }}
 
 runs:
   using: 'composite'
