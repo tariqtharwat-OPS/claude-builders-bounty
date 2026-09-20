@@ -6,16 +6,21 @@ hook decision, so Claude Code's normal permission flow remains in control.
 
 ## Claude Code registration
 
-Copy the script to a stable absolute path and make it executable:
+From this directory, run the installer once:
 
 ```bash
-mkdir -p ~/.claude/hooks
-cp block-destructive.sh ~/.claude/hooks/block-destructive.sh
-chmod 700 ~/.claude/hooks/block-destructive.sh
+./install.sh
 ```
 
-Add this to `~/.claude/settings.json` (merge it with existing settings; do not
-replace unrelated configuration):
+It copies the hook and its tokenizer to `~/.claude/hooks/`, then merges one
+`Bash` `PreToolUse` entry into `~/.claude/settings.json` without replacing
+unrelated settings. The installed hook uses its adjacent tokenizer, so the
+absolute path remains valid from every project.
+
+Manual registration is also supported: copy both `block-destructive.sh` and
+`command_parser.py` to a stable absolute directory, make them executable, and
+add this to `~/.claude/settings.json` (merge it; do not replace unrelated
+configuration):
 
 ```json
 {
@@ -45,16 +50,22 @@ than explicitly returning `allow` and bypassing Claude Code permissions.
 
 ## Blocked patterns
 
-- Filesystem destruction: root, glob-root, parent/current/home directories, and
-  `./build` targets used with recursive/force `rm` options
-- `DROP TABLE`, `DROP DATABASE`, `TRUNCATE`, and `DELETE FROM` without `WHERE`
-- `git push --force`, `git push -f`, and `git reset --hard`
-- Disk formatting/wiping and `shutdown`, `halt`, or `init 0`
-- Common `curl|sh`, `curl|bash`, `wget|bash`, and Python command-execution forms
+The classifier tokenizes command boundaries, shell quoting, wrappers, and options;
+it does not search arbitrary text for dangerous substrings. It blocks:
 
-A word such as `halt` in `printf halt` is not treated as a shutdown command.
-Blocked attempts are logged to `~/.claude/hooks/blocked.log`; the `project` value
-comes from the request's JSON `cwd`.
+- Filesystem destruction: root, normalized parent traversal, glob-root,
+  parent/current/home directories, sensitive system subtrees, and `./build`
+- `DROP TABLE`, `DROP DATABASE`, `TRUNCATE`, and `DELETE FROM` without `WHERE`,
+  including multiline SQL and SQL comments
+- `git push --force`, `git push -f`, `git push --force-with-lease` (including
+  `git -C repo push ...`), and `git reset --hard`
+- `shutdown` and `halt` as command words, plus the existing download-to-shell
+  and disk-wipe patterns
+
+Ordinary `rm -rf build` remains neutral. Quoted documentation such as
+`echo 'rm -rf /'` and `printf 'git push --force'` remains neutral. Blocked
+attempts are logged to `~/.claude/hooks/blocked.log`; the `project` value comes
+from the request's JSON `cwd`.
 
 ## Testing
 
@@ -65,5 +76,7 @@ bash tests/test_block_destructive.sh
 ```
 
 The test invokes the script with the same JSON-over-stdin protocol Claude Code
-uses and checks denial, neutral safe-command behavior, adversarial path forms,
-benign halt text, and JSON `cwd` logging.
+uses and checks denial, neutral safe-command behavior, quoted echo/documentation,
+`git -C` force pushes, force-with-lease, normalized paths, multiline/commented
+SQL, benign halt text, and JSON `cwd` logging. The installer is intentionally
+small and only merges its own hook entry.

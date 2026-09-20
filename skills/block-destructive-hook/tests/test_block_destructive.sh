@@ -31,6 +31,15 @@ assert_decision() {
 # Destructive commands receive deny; safe Bash receives no decision so Claude
 # Code's ordinary permission handling remains authoritative.
 assert_decision 'rm -rf /' deny 'denies rm -rf /'
+assert_decision "echo 'rm -rf /'" neutral 'does not match destructive text inside echo quotes'
+assert_decision "printf '%s' \"git push --force\"" neutral 'does not match documentation text inside printf'
+assert_decision 'git -C repo push -f origin main' deny 'denies force push after git -C'
+assert_decision 'git -C repo push --force origin main' deny 'denies long force push after git -C'
+assert_decision 'git push --force-with-lease origin main' deny 'denies force-with-lease push'
+assert_decision 'rm -rf /tmp/..' deny 'denies normalized parent traversal to root'
+assert_decision $'DELETE FROM users\n-- WHERE id=5' deny 'denies multiline DELETE with SQL comment'
+assert_decision $'psql -c \"DELETE FROM users /* harmless-looking comment */\n-- WHERE id=5\"' deny 'denies DELETE hidden in multiline SQL comments'
+assert_decision $'psql -c \"DELETE FROM users\nWHERE id=5\"' neutral 'allows multiline DELETE with WHERE'
 assert_decision 'rm -r -f -- /' deny 'denies split flags and -- root'
 assert_decision 'rm -rf ~' deny 'denies home directory'
 assert_decision 'rm -rf .' deny 'denies current directory'
