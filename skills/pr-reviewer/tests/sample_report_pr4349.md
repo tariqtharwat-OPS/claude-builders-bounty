@@ -3,6 +3,7 @@
 ### 📋 Summary
 - **PR:** feat: add block-destructive hook (Issue #3)
 - **Files changed:** 3 (303 lines added, 0 removed)
+- **Confidence:** High
 - **Overall assessment:** ✅ Looks good with minor suggestions
 
 ### ✅ Code Quality

@@ -3,6 +3,7 @@
 ### 📋 Summary
 - **PR:** feat: add PR reviewer agent skill (Issue #4)
 - **Files changed:** 6 (588 lines added, 0 removed)
+- **Confidence:** Medium
 - **Overall assessment:** ⚠️ Needs revision before merge
 
 ### ✅ Code Quality
