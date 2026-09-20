@@ -158,6 +158,48 @@ def _diff_paths(header: str) -> tuple[str, str] | None:
     return (match.group(1), match.group(2)) if match else None
 
 
+_GIT_BINARY_ALPHABET = set(
+    "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`|~"
+)
+
+
+def _validate_git_binary_payload(lines: list[str]) -> str | None:
+    """Validate the framed, size-delimited payload emitted by ``git diff --binary``."""
+    if not lines:
+        return "GIT binary patch has no payload"
+    index = 0
+    sections = 0
+    while index < len(lines):
+        match = re.fullmatch(r"(?:literal|delta) (\d+)", lines[index])
+        if not match:
+            return "GIT binary patch has an invalid literal/delta header"
+        expected = int(match.group(1))
+        index += 1
+        decoded = 0
+        payload_lines = 0
+        while index < len(lines) and lines[index] != "":
+            encoded = lines[index]
+            if not encoded or encoded[0] not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz":
+                return "GIT binary patch has an invalid payload length"
+            length = (ord(encoded[0]) - ord("A") + 1
+                      if encoded[0].isupper() else ord(encoded[0]) - ord("a") + 27)
+            if length > 52 or len(encoded) != 1 + ((length + 3) // 4) * 5:
+                return "GIT binary patch has a truncated or malformed payload line"
+            if any(char not in _GIT_BINARY_ALPHABET for char in encoded[1:]):
+                return "GIT binary patch has invalid base85 payload characters"
+            decoded += length
+            payload_lines += 1
+            index += 1
+        if decoded != expected or (expected and not payload_lines):
+            return "GIT binary patch payload length does not match its declared size"
+        sections += 1
+        if index < len(lines):
+            index += 1
+            if index == len(lines):
+                return "GIT binary patch ends between payload sections"
+    return None if sections else "GIT binary patch has no payload sections"
+
+
 def _path_from_header(value: str, prefix: str) -> str | None:
     """Return a conventional ---/+++ path, or None for an invalid header."""
     if value == "/dev/null":
@@ -219,6 +261,10 @@ def analyze_diff(diff_text: str) -> dict:
                 if (current_state["old_header"] or current_state["new_header"] or
                         current_state["saw_hunk"]):
                     warn(f"binary patch for {current or 'unknown file'} also contains text structure")
+                if current_state["git_binary"]:
+                    error = _validate_git_binary_payload(current_state["binary_payload"])
+                    if error:
+                        warn(f"{error} in {current or 'unknown file'}")
                 if current_state["safe"] and current not in result["binary_files"]:
                     result["binary_files"].append(current)
             else:
@@ -246,7 +292,8 @@ def analyze_diff(diff_text: str) -> dict:
                              "saw_hunk": False, "binary": False,
                              "safe": safe,
                              "old_diff": paths[0] if paths else None,
-                             "new_diff": paths[1] if paths else None}
+                             "new_diff": paths[1] if paths else None,
+                             "git_binary": False, "binary_payload": []}
             if not paths:
                 warn("an unreadable diff header was found")
             elif not safe:
@@ -318,6 +365,8 @@ def analyze_diff(diff_text: str) -> dict:
                         marker.group(1) != current_state["old_diff"] or
                         marker.group(2) != current_state["new_diff"]):
                     warn(f"binary marker paths do not match the diff header in {current or 'unknown file'}")
+            else:
+                current_state["git_binary"] = True
             current_state["binary"] = True
             result["parse_warnings"].append(f"binary content in {current} was not line-inspected")
             continue
@@ -339,9 +388,9 @@ def analyze_diff(diff_text: str) -> dict:
             continue
         if hunk is None:
             if current_state["binary"]:
-                # A GIT binary patch payload is intentionally opaque. It is
-                # represented as an uninspectable file and can never support a
-                # complete security conclusion.
+                if current_state["git_binary"]:
+                    current_state["binary_payload"].append(raw)
+                # Binary content is uninspectable, but its framing is validated.
                 continue
             if raw.startswith(("index ", "old mode ", "new mode ",
                                "new file mode ", "deleted file mode ",

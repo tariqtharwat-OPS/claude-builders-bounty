@@ -149,6 +149,30 @@ def test_action_does_not_interpolate_or_allow_output_path_escape():
     assert 'output_file must be a non-empty path inside the workspace' in action
 
 
+def test_truncated_git_binary_patch_is_rejected_as_malformed():
+    patch = ("diff --git a/x.bin b/x.bin\n"
+             "GIT binary patch\n")
+    analysis, output = report(metadata(changedFiles=1), patch)
+    assert analysis["input_state"] == "rejected"
+    assert analysis["reviewable"] is False
+    assert "no payload" in output
+
+
+def test_git_binary_payload_structure_and_sizes_are_validated():
+    valid = ("diff --git a/x.bin b/x.bin\n"
+             "GIT binary patch\n"
+             "literal 4\n"
+             "D00000\n")
+    analysis, _ = report(metadata(additions=0, deletions=0, changedFiles=1), valid)
+    assert analysis["input_state"] == "limited"
+    assert analysis["reviewable"] is False
+
+    truncated = valid.replace("D00000", "D0000")
+    analysis, output = report(metadata(changedFiles=1), truncated)
+    assert analysis["input_state"] == "rejected"
+    assert "truncated or malformed" in output
+
+
 def test_binary_marker_cannot_be_followed_by_textual_hunks():
     patch = ("diff --git a/app.py b/app.py\n"
              "Binary files a/app.py and b/app.py differ\n"
@@ -394,6 +418,18 @@ def test_rejected_diff_cli_exits_nonzero_with_a_rejection_report(tmp_path):
     assert result.returncode == 2
     assert "Rejected review" in result.stdout
     assert "Traceback" not in result.stderr
+
+
+def test_committed_real_output_fixtures_match_current_report_contract():
+    empty = reviewer.finalize_analysis(reviewer.analyze_diff(""), "")
+    expected_empty = reviewer.generate_report({"title": "Authorship and follow-up"}, empty)
+    assert expected_empty == (Path(__file__).parent / "real_outputs" / "cli-14481.md").read_text()
+
+    current = (Path(__file__).parent / "real_outputs" / "cli-14478.md").read_text()
+    assert "**Diff evidence:** 2 file(s), +141/-1 lines" in current
+    assert "**Confidence:** Medium" in current
+    assert "This change touches" not in current
+    assert "Overall assessment:** ✅ Looks good with minor suggestions" in current
 
 
 def test_evidence_binding_is_emitted_verbatim():

@@ -50,7 +50,7 @@ The report deliberately distinguishes four input states:
 - **Limited:** binary/uninspectable files or incomplete metadata are named explicitly, confidence is Low, and no security conclusion is made for uninspected content. A binary-only patch does not receive a normal review.
 - **Rejected:** unsafe paths, conflicting/duplicate headers, malformed hunks, repeated file sections, or binary/text structure mixed within one file produce a rejection report and exit status 2.
 
-Missing or mismatched metadata is always surfaced as uncertainty rather than silently treated as fact. Binary files can coexist with valid textual files, but every uninspectable path is listed and the result remains a limited review requiring manual inspection.
+Missing or mismatched metadata is always surfaced as uncertainty rather than silently treated as fact. Binary files can coexist with valid textual files, but every uninspectable path is listed and the result remains a limited review requiring manual inspection. `GIT binary patch` payloads are structurally validated (literal/delta framing, base85 line lengths, and declared byte totals); truncated, malformed, or binary/text-mixed sections are rejected rather than downgraded to a limited review.
 
 For offline/reproducible runs, metadata and diff files are also supported. Capture those inputs from the public PR at a pinned revision and commit only sanitized fixtures; never commit credentials:
 
