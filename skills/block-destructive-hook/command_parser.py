@@ -77,6 +77,114 @@ def tokenize(text: str) -> list[list[Token]]:
     return [command for command in commands if command]
 
 
+def shell_substitutions(text: str) -> list[str]:
+    """Return commands executed by $(...) and backtick substitutions.
+
+    This intentionally understands only the quoting needed to distinguish shell
+    syntax from literal documentation.  In particular, substitutions in single
+    quotes (and escaped substitutions) are data, while substitutions in double
+    quotes still execute.
+    """
+    found: list[str] = []
+    i = 0
+    quote: str | None = None
+    while i < len(text):
+        ch = text[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        if quote == '"':
+            if ch == '"':
+                quote = None
+                i += 1
+                continue
+            if text.startswith("$(", i):
+                body, end = _parenthesized_substitution(text, i + 2)
+                if body is not None:
+                    found.append(body)
+                    i = end
+                    continue
+            elif ch == "`":
+                body, end = _backtick_substitution(text, i + 1)
+                if body is not None:
+                    found.append(body)
+                    i = end
+                    continue
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            i += 1
+        elif ch == "\\":
+            i += 2
+        elif text.startswith("$(", i):
+            body, end = _parenthesized_substitution(text, i + 2)
+            if body is not None:
+                found.append(body)
+                i = end
+            else:
+                i += 2
+        elif ch == "`":
+            body, end = _backtick_substitution(text, i + 1)
+            if body is not None:
+                found.append(body)
+                i = end
+            else:
+                i += 1
+        else:
+            i += 1
+    return found
+
+
+def _backtick_substitution(text: str, start: int) -> tuple[str | None, int]:
+    i = start
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+        elif text[i] == "`":
+            return text[start:i], i + 1
+        else:
+            i += 1
+    return None, start
+
+
+def _parenthesized_substitution(text: str, start: int) -> tuple[str | None, int]:
+    depth = 1
+    i = start
+    quote: str | None = None
+    while i < len(text):
+        ch = text[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        if quote == '"':
+            if ch == '"':
+                quote = None
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+        elif text.startswith("$(", i):
+            depth += 1
+            i += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start:i], i + 1
+        i += 1
+    return None, start
+
+
 def command_name(tokens: list[Token]) -> tuple[str | None, int]:
     """Return executable name and index after harmless command wrappers."""
     i = 0
@@ -169,6 +277,11 @@ def git_force_push(tokens: list[Token], index: int) -> bool:
 
 
 def is_destructive(command: str) -> bool:
+    # Command substitutions execute even when embedded in an otherwise benign
+    # command. Inspect only shell syntax, not single-quoted documentation.
+    if any(is_destructive(substitution) for substitution in shell_substitutions(command)):
+        return True
+
     for tokens in tokenize(command):
         name, index = command_name(tokens)
         if not name:
@@ -198,6 +311,19 @@ def is_destructive(command: str) -> bool:
             return True
         if name == "python" and any(t.value in {"-c", "-e"} for t in tokens[index + 1 :]):
             if any(re.search(r"(?:os\.system|subprocess)", t.value) for t in tokens[index + 1 :]):
+                return True
+        # A shell's -c string and eval's arguments are executable shell code,
+        # unlike the same text passed to echo/printf as documentation.
+        if name in {"sh", "bash", "zsh", "dash", "ksh", "shell"}:
+            args = tokens[index + 1 :]
+            for position, token in enumerate(args):
+                if token.value == "-c" and position + 1 < len(args):
+                    if is_destructive(args[position + 1].value):
+                        return True
+                    break
+        if name == "eval":
+            payload = " ".join(token.value for token in tokens[index + 1 :])
+            if payload and is_destructive(payload):
                 return True
     # Pipelines such as curl | sh are still structurally visible as commands.
     names = [command_name(tokens)[0] for tokens in tokenize(command)]

@@ -43,6 +43,34 @@ You're in the right place.
 
 ---
 
+## Included Bounty #3 package
+
+This checkout includes the Claude Code `PreToolUse` safety hook in
+`skills/block-destructive-hook/`:
+
+- `block-destructive.sh` — protocol-aware hook that denies destructive Bash commands
+- `command_parser.py` — structural classifier, including shell substitutions,
+  `sh -c`/shell `-c`, and `eval` payloads
+- `install.sh` — installs both files to `~/.claude/hooks/` and merges the Bash
+  hook entry into `~/.claude/settings.json`
+- `README.md` — package-specific registration and behavior documentation
+
+From the package directory, install with:
+
+```bash
+cd skills/block-destructive-hook
+./install.sh
+```
+
+Run the included protocol and regression checks from the repository root:
+
+```bash
+bash tests/test_block_destructive.sh
+```
+
+The hook is intentionally limited to blocking classified destructive commands;
+safe commands remain neutral so Claude Code's normal permission flow applies.
+
 ## Community
 
 - 🐦 X: [@ClaudeBounty](https://x.com/ClaudeBounty)

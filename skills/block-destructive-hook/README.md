@@ -51,7 +51,9 @@ than explicitly returning `allow` and bypassing Claude Code permissions.
 ## Blocked patterns
 
 The classifier tokenizes command boundaries, shell quoting, wrappers, and options;
-it does not search arbitrary text for dangerous substrings. It blocks:
+it does not search arbitrary text for dangerous substrings. It recursively inspects
+executing shell payloads in `$(...)`, backticks, shell `-c`/`sh -c`, and `eval`,
+while leaving single-quoted documentation and echo/printf examples neutral. It blocks:
 
 - Filesystem destruction: root, normalized parent traversal, glob-root,
   parent/current/home directories, sensitive system subtrees, and `./build`
@@ -69,7 +71,7 @@ from the request's JSON `cwd`.
 
 ## Testing
 
-Run the protocol-level tests from this directory:
+Run the protocol-level tests from the repository root:
 
 ```bash
 bash tests/test_block_destructive.sh
