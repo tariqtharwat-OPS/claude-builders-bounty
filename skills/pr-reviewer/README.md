@@ -36,7 +36,7 @@ The CLI accepts a real GitHub PR URL, fetches metadata and the diff with `gh` wh
 Requirements: Python 3.10 or newer. The CLI has no third-party Python dependencies. An authenticated `gh` installation is optional but recommended to avoid GitHub's low unauthenticated API rate limit.
 
 ```bash
-python skills/pr-reviewer/scripts/generate_review.py \\
+python3 skills/pr-reviewer/scripts/generate_review.py \\
   --pr https://github.com/owner/repo/pull/123 \\
   --output report.md
 ```
@@ -55,7 +55,7 @@ Missing or mismatched metadata is always surfaced as uncertainty rather than sil
 For offline/reproducible runs, metadata and diff files are also supported. Capture those inputs from the public PR at a pinned revision and commit only sanitized fixtures; never commit credentials:
 
 ```bash
-python skills/pr-reviewer/scripts/generate_review.py --metadata pr_metadata.json --diff pr_diff.patch -o report.md
+python3 skills/pr-reviewer/scripts/generate_review.py --metadata pr_metadata.json --diff pr_diff.patch -o report.md
 ```
 
 The GitHub Action accepts workspace-relative `output_file` paths (including nested paths), and rejects absolute paths, `..` escapes, and symlink escapes before writing or uploading a report. Shell arguments are passed through environment variables and quoting; posting remains opt-in.
@@ -93,7 +93,7 @@ For exact-candidate audit artifacts, optionally bind the report to `--candidate-
 ## Acceptance Criteria
 
 - [x] Works via GitHub Action (`action.yml`)
-- [x] Works via CLI (`python skills/pr-reviewer/scripts/generate_review.py --pr <URL>`)
+- [x] Works via CLI (`python3 skills/pr-reviewer/scripts/generate_review.py --pr <URL>`)
 - [x] Structured Markdown output with Summary, Code Quality, Security, Tests, Documentation, Suggestions, and Confidence
 - [x] Executed against 2 real public PR URLs; captured outputs are in `tests/real_outputs/`
 - [x] README with setup instructions
