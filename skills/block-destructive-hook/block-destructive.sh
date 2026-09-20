@@ -1,164 +1,116 @@
 #!/bin/bash
-# Claude Code Hook: Block Destructive Commands
-# 
-# Pre-tool-use hook that intercepts dangerous bash commands before execution.
-# Follows Claude Code hooks format: ~/.claude/hooks/
-#
-# Install:
-#   1. mkdir -p ~/.claude/hooks
-#   2. cp block-destructive.sh ~/.claude/hooks/
-#   3. chmod +x ~/.claude/hooks/block-destructive.sh
+# Claude Code PreToolUse hook: block destructive Bash commands.
+# Protocol input is JSON on stdin; the legacy command-argument mode is retained
+# for local smoke tests.
 
 set -euo pipefail
 
-# Claude Code sends PreToolUse hooks a JSON object on stdin.  Keep the
-# argument form as a small, convenient local smoke-test interface.
-PROTOCOL_INPUT=""
-if [ "$#" -eq 0 ]; then
-  PROTOCOL_INPUT=$(cat)
-fi
-
-# Log file per spec: ~/.claude/hooks/blocked.log
 LOG_FILE="$HOME/.claude/hooks/blocked.log"
-
-# Ensure log directory exists
 mkdir -p "$(dirname "$LOG_FILE")"
 
-# List of destructive command patterns to block (per acceptance criteria)
 DESTRUCTIVE_PATTERNS=(
-  # File system destruction
-  "rm\s+-rf\s+/"                    # rm -rf /
-  "rm\s+-rf\s+\*"                   # rm -rf *
-  "rm\s+-rf\s+\.\."                 # rm -rf ..
-  "rm\s+(--recursive|--force|-r|-f|-[rf]{2})\s+(--recursive|--force|-r|-f|-[rf]{2})\s+(\/|\*|\.\.)" # split rm flags
-  
-  # Database destruction
-  "DROP\s+TABLE"                    # DROP TABLE
-  "DROP\s+DATABASE"                 # DROP DATABASE
-  "TRUNCATE\s+"                     # TRUNCATE
-  "DELETE\s+FROM\s+\w+\s*;"         # DELETE FROM without WHERE
-  "DELETE\s+FROM\s+\w+\s*$"         # DELETE FROM without WHERE (end of line)
-  
-  # Git destruction
-  "git\s+push\s+--force"            # git push --force
-  "git\s+push\s+-f"                 # git push -f
-  "git\s+reset\s+--hard"            # git reset --hard (on main/master)
-  
-  # System destruction
-  "dd\s+if=/dev/zero"               # dd disk wipe
-  "dd\s+if=/dev/random"             # dd disk wipe
-  "mkfs\."                          # mkfs format
-  "shutdown\s+-h\s+now"             # Immediate shutdown
-  "halt"                            # System halt
-  "init\s+0"                        # Runlevel 0 (shutdown)
-  
-  # Remote code execution
-  "wget.*\|\s*bash"                 # Download and execute
-  "curl.*\|\s*sh"                   # Download and execute
-  "curl.*\|\s*bash"                 # Download and execute
-  "python.*-c\s+import\s+os.*system" # Python system command injection
+  'DROP[[:space:]]+TABLE'
+  'DROP[[:space:]]+DATABASE'
+  'TRUNCATE[[:space:]]+'
+  'DELETE[[:space:]]+FROM[[:space:]]+[[:alnum:]_."`]+[[:space:]]*(;|$)'
+  'git[[:space:]]+push([^;|&]*[[:space:]])(-f|--force)([[:space:]]|$)'
+  'git[[:space:]]+reset[[:space:]]+--hard'
+  'dd[[:space:]]+if=/dev/(zero|random)'
+  'mkfs\.'
+  'init[[:space:]]+0'
+  'wget.*\|[[:space:]]*bash'
+  'curl.*\|[[:space:]]*(sh|bash)'
+  'python.*-[ce][[:space:]]+.*(os\.system|subprocess)'
 )
 
-# Function to check if a command is destructive
+# Return success when a command contains a destructive operation.  This is
+# deliberately conservative for filesystem targets, but does not treat every
+# occurrence of the word "halt" as a shutdown command (for example, echo halt).
 is_destructive() {
   local cmd="$1"
-  
-  for pattern in "${DESTRUCTIVE_PATTERNS[@]}"; do
-    if echo "$cmd" | grep -qiE "$pattern"; then
-      return 0  # Match found - destructive
-    fi
-  done
-  
-  return 1  # No match - safe
-}
+  local normalized rm_candidate
+  normalized=$(printf '%s' "$cmd" | tr '\n\r\t' '   ')
+  # Quotes do not change an rm target; removing them lets the safety check
+  # catch forms such as rm -rf "~/" without interpreting shell input.
+  rm_candidate=$(printf '%s' "$normalized" | tr -d "'\"")
 
-# Function to log blocked attempts per spec
-log_blocked() {
-  local cmd="$1"
-  local project_path="${CLAUDE_PROJECT_PATH:-$(pwd)}"
-  local timestamp
-  timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-  echo "[$timestamp] BLOCKED: $cmd | project: $project_path" >> "$LOG_FILE"
-}
-
-# Main function: validate command before execution
-validate_command() {
-  local cmd="$1"
-  
-  # Skip empty commands
-  if [ -z "$cmd" ]; then
+  # rm options may be separate, combined, long, or followed by --.  Block
+  # filesystem roots, glob roots, parent/current/home directories, and the
+  # common build-tree form; ordinary named paths remain usable.
+  if printf '%s' "$rm_candidate" | grep -qiE '(^|[^[:alnum:]_])rm([[:space:]]+(-[[:alnum:]]+|--[[:alnum:]-]+|--)){1,}[[:space:]]+(/|/\*|\*|\.\.?/?|\.\/\*|~(/.*)?|\$HOME(/.*)?|\./build(/.*)?)([[:space:];|&]|$)'; then
     return 0
   fi
-  
-  # Check if destructive
+
+  # Shutdown commands must be command words, not harmless prose/arguments.
+  if printf '%s' "$normalized" | grep -qiE '(^|[;|&])[[:space:]]*(sudo[[:space:]]+)?(halt|shutdown)([[:space:]]|$)'; then
+    return 0
+  fi
+
+  for pattern in "${DESTRUCTIVE_PATTERNS[@]}"; do
+    if printf '%s' "$normalized" | grep -qiE "$pattern"; then
+      return 0
+    fi
+  done
+
+  # Cover SQL schema qualification and DELETE statements with quoted table
+  # names without blocking DELETE ... WHERE ... statements.
+  if printf '%s' "$normalized" | grep -qiE '(^|[^[:alnum:]_])delete[[:space:]]+from[[:space:]]+[^[:space:];|&]+[[:space:]]*(;|$)'; then
+    return 0
+  fi
+  return 1
+}
+
+log_blocked() {
+  local cmd="$1"
+  local project_path="${2:-${CLAUDE_PROJECT_PATH:-$(pwd)}}"
+  local timestamp
+  timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+  printf '[%s] BLOCKED: %s | project: %s\n' "$timestamp" "$cmd" "$project_path" >> "$LOG_FILE"
+}
+
+validate_command() {
+  local cmd="$1"
+  [ -z "$cmd" ] && return 0
   if is_destructive "$cmd"; then
-    # Clear message to Claude explaining why blocked
-    echo "⚠️  DESTRUCTIVE COMMAND BLOCKED"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "Command: $cmd"
-    echo ""
-    echo "This command was blocked because it matches known destructive patterns:"
-    echo "  • rm -rf / or similar filesystem destruction"
-    echo "  • DROP TABLE / TRUNCATE / DELETE FROM without WHERE"
-    echo "  • git push --force or git reset --hard"
-    echo "  • dd, mkfs, or system shutdown commands"
-    echo "  • Remote code execution via curl/wget | bash"
-    echo ""
-    echo "If this is intentional, run the command directly in your terminal."
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    
-    # Log the blocked attempt
+    printf '%s\n' 'DESTRUCTIVE COMMAND BLOCKED' "Command: $cmd"
     log_blocked "$cmd"
-    
-    # Return non-zero to block execution
     return 1
   fi
-  
-  # Command is safe - allow execution
   return 0
 }
 
-# Protocol mode: emit only Claude Code's structured hook response on stdout.
-if [ -n "$PROTOCOL_INPUT" ]; then
-  command=$(printf '%s' "$PROTOCOL_INPUT" | python3 -c '
-import json, sys
+# Claude Code's official PreToolUse contract: deny only when this hook has a
+# decision.  Safe/non-Bash input intentionally produces no permissionDecision,
+# preserving Claude Code's normal permission flow rather than granting access.
+if [ "$#" -eq 0 ]; then
+  PROTOCOL_INPUT=$(cat)
+  parsed=$(printf '%s' "$PROTOCOL_INPUT" | python3 -c '
+import base64, json, sys
 try:
-    data=json.load(sys.stdin)
+    data = json.load(sys.stdin)
     if data.get("tool_name") == "Bash":
-        print(data.get("tool_input", {}).get("command", ""))
-    else:
-        print("")
+        tool_input = data.get("tool_input") or {}
+        command = tool_input.get("command", "")
+        cwd = data.get("cwd") or ""
+        print(base64.b64encode(command.encode()).decode() + "\t" + base64.b64encode(cwd.encode()).decode())
 except (ValueError, TypeError, AttributeError):
-    print("")
+    pass
 ')
+  if [ -z "$parsed" ]; then
+    exit 0
+  fi
+  command_b64=${parsed%%$'\t'*}
+  cwd_b64=${parsed#*$'\t'}
+  command=$(printf '%s' "$command_b64" | base64 --decode 2>/dev/null || printf '%s' "$command_b64" | base64 -D)
+  cwd=$(printf '%s' "$cwd_b64" | base64 --decode 2>/dev/null || printf '%s' "$cwd_b64" | base64 -D)
   if [ -n "$command" ] && is_destructive "$command"; then
-    log_blocked "$command"
-    python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Destructive command blocked by safety hook."}}))'
-  else
-    python3 -c 'import json; print(json.dumps({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}))'
+    log_blocked "$command" "${cwd:-${CLAUDE_PROJECT_PATH:-$(pwd)}}"
+    printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Destructive command blocked by safety hook."}}'
   fi
   exit 0
 fi
 
-# If called with arguments, validate the first argument as a command
-if [ $# -gt 0 ]; then
-  if validate_command "$1"; then
-    exit 0  # Safe - allow
-  else
-    exit 1  # Blocked
-  fi
+if [ "$#" -gt 0 ]; then
+  validate_command "$1"
+  exit $?
 fi
-
-# Otherwise, show usage
-echo "Usage: block-destructive.sh <command>"
-echo ""
-echo "Claude Code hook that blocks destructive bash commands."
-echo ""
-echo "Installation (2 commands):"
-echo "  mkdir -p ~/.claude/hooks && cp block-destructive.sh ~/.claude/hooks/"
-echo "  chmod +x ~/.claude/hooks/block-destructive.sh"
-echo ""
-echo "Blocked patterns: rm -rf, DROP TABLE, git push --force, TRUNCATE,"
-echo "DELETE FROM without WHERE, dd, mkfs, shutdown, curl|bash, etc."
-echo ""
-echo "Blocked attempts are logged to: $LOG_FILE"
