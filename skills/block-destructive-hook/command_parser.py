@@ -287,6 +287,17 @@ def is_destructive(command: str) -> bool:
         name, index = command_name(tokens)
         if not name:
             continue
+        # Common utility wrappers execute the remaining arguments as a command;
+        # recursively classify that payload instead of treating the wrapper as
+        # the terminal command name.
+        for position, token in enumerate(tokens):
+            if token.value in {"exec", "timeout", "nohup", "nice", "xargs"}:
+                payload = tokens[position + 1 :]
+                if token.value == "timeout":
+                    while payload and (payload[0].value.startswith("-") or re.fullmatch(r"[0-9]+(?:ms|s|m|h|d)?", payload[0].value)):
+                        payload = payload[1:]
+                if payload and is_destructive(" ".join(item.value for item in payload)):
+                    return True
         if name == "rm" and shell_rm_dangerous(tokens, index):
             return True
         if name == "git" and (git_force_push(tokens, index) or any(t.value == "--hard" for t in tokens[index + 1 :]) and any(t.value == "reset" for t in tokens[index + 1 :])):
@@ -326,7 +337,7 @@ def is_destructive(command: str) -> bool:
             if token.value in shell_names and position + 1 < len(tokens):
                 shell_args = tokens[position + 1 :]
                 for shell_position, shell_token in enumerate(shell_args):
-                    if shell_token.value == "-c" and shell_position + 1 < len(shell_args):
+                    if shell_token.value in {"-c", "-ec", "-e", "--command"} and shell_position + 1 < len(shell_args):
                         if is_destructive(shell_args[shell_position + 1].value):
                             return True
                         break
