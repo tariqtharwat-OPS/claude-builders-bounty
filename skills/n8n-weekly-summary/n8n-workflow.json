@@ -6,28 +6,68 @@
         "rule": {
           "interval": [
             {
-              "field": "weeks"
+              "field": "cronExpression",
+              "expression": "0 17 * * 5"
             }
           ]
         }
       },
-      "name": "Schedule Trigger",
+      "name": "Weekly Trigger (Friday 5PM)",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1,
       "position": [240, 300]
     },
     {
       "parameters": {
-        "resource": "repository",
-        "operation": "getMany",
-        "owner": "={{ $json.owner }}",
-        "repository": "={{ $json.repo }}",
+        "values": {
+          "string": [
+            {
+              "name": "GITHUB_OWNER",
+              "value": "={{ $env.GITHUB_OWNER || 'your-org' }}"
+            },
+            {
+              "name": "GITHUB_REPO",
+              "value": "={{ $env.GITHUB_REPO || 'your-repo' }}"
+            },
+            {
+              "name": "WEBHOOK_URL",
+              "value": "={{ $env.WEBHOOK_URL || '' }}"
+            },
+            {
+              "name": "ANTHROPIC_API_KEY",
+              "value": "={{ $env.ANTHROPIC_API_KEY || '' }}"
+            },
+            {
+              "name": "LANGUAGE",
+              "value": "={{ $env.LANGUAGE || 'EN' }}"
+            },
+            {
+              "name": "recipient_email",
+              "value": "={{ $env.RECIPIENT_EMAIL || '' }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Set Configuration",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "resource": "issue",
+        "operation": "getAll",
+        "owner": "={{ $json.GITHUB_OWNER }}",
+        "repository": "={{ $json.GITHUB_REPO }}",
+        "state": "closed",
+        "since": "={{ $now.minus({ weeks: 1 }).toISO() }}",
         "returnAll": true
       },
-      "name": "Get GitHub Issues",
+      "name": "Get Closed Issues",
       "type": "n8n-nodes-base.github",
       "typeVersion": 1,
-      "position": [460, 300],
+      "position": [680, 200],
       "credentials": {
         "githubApi": {
           "id": "github-creds",
@@ -37,17 +77,17 @@
     },
     {
       "parameters": {
-        "resource": "repository",
-        "operation": "getPullRequests",
-        "owner": "={{ $json.owner }}",
-        "repository": "={{ $json.repo }}",
-        "state": "all",
+        "resource": "pullRequest",
+        "operation": "getAll",
+        "owner": "={{ $json.GITHUB_OWNER }}",
+        "repository": "={{ $json.GITHUB_REPO }}",
+        "state": "closed",
         "returnAll": true
       },
-      "name": "Get GitHub PRs",
+      "name": "Get Merged PRs",
       "type": "n8n-nodes-base.github",
       "typeVersion": 1,
-      "position": [460, 500],
+      "position": [680, 400],
       "credentials": {
         "githubApi": {
           "id": "github-creds",
@@ -59,15 +99,15 @@
       "parameters": {
         "resource": "repository",
         "operation": "getCommits",
-        "owner": "={{ $json.owner }}",
-        "repository": "={{ $json.repo }}",
+        "owner": "={{ $json.GITHUB_OWNER }}",
+        "repository": "={{ $json.GITHUB_REPO }}",
         "since": "={{ $now.minus({ weeks: 1 }).toISO() }}",
         "returnAll": true
       },
-      "name": "Get GitHub Commits",
+      "name": "Get Weekly Commits",
       "type": "n8n-nodes-base.github",
       "typeVersion": 1,
-      "position": [460, 700],
+      "position": [680, 600],
       "credentials": {
         "githubApi": {
           "id": "github-creds",
@@ -78,123 +118,194 @@
     {
       "parameters": {
         "mode": "combine",
-        "combinationMode": "mergeByPosition"
+        "combinationMode": "mergeByPosition",
+        "options": {}
       },
-      "name": "Merge Data",
+      "name": "Merge Activity Data",
       "type": "n8n-nodes-base.merge",
-      "typeVersion": 2,
-      "position": [680, 500]
+      "typeVersion": 1,
+      "position": [900, 400]
     },
     {
       "parameters": {
-        "promptType": "define",
-        "text": "=Create a weekly development summary report from the following data:\n\nIssues (last 7 days):\n{{ JSON.stringify($json.issues, null, 2) }}\n\nPull Requests (last 7 days):\n{{ JSON.stringify($json.prs, null, 2) }}\n\nCommits (last 7 days):\n{{ JSON.stringify($json.commits, null, 2) }}\n\nFormat as Markdown with sections:\n## Weekly Development Summary - {{ $now.toFormat('yyyy-MM-dd') }}\n\n### 📊 Overview\n- Total commits: X\n- New issues: Y\n- Merged PRs: Z\n\n### 🔥 Key Changes\n- List top 5 most impactful changes\n\n### 🐛 Bug Fixes\n- Summarize fixed issues\n\n### ✨ New Features\n- Summarize new functionality\n\n### 👀 Code Review Notes\n- Any patterns or concerns\n\n### 📈 Metrics\n- Commit frequency\n- Issue resolution rate",
         "options": {
-          "temperature": 0.3,
-          "maxTokens": 2000
-        }
+          "responseFormat": "text"
+        },
+        "model": "claude-sonnet-4-20250514",
+        "promptType": "define",
+        "text": "=Generate a weekly development summary in {{ $json.LANGUAGE == 'FR' ? 'French' : 'English' }} from the following GitHub activity data for the repository {{ $json.GITHUB_OWNER }}/{{ $json.GITHUB_REPO }}.\n\nClosed Issues (last 7 days):\n{{ JSON.stringify($json.issues || [], null, 2) }}\n\nMerged Pull Requests (last 7 days):\n{{ JSON.stringify($json.prs || [], null, 2) }}\n\nCommits (last 7 days):\n{{ JSON.stringify($json.commits || [], null, 2) }}\n\nFormat as Markdown with these sections:\n## Weekly Development Summary - {{ $now.toFormat('yyyy-MM-dd') }}\n\n### 📊 Overview\n- Total commits this week\n- Issues closed this week\n- PRs merged this week\n\n### 🔥 Key Changes\n- Summarize the most significant code changes and features\n\n### 🐛 Bug Fixes\n- List notable bug fixes from closed issues and commit messages\n\n### ✨ New Features\n- List new features from merged PRs and commit messages\n\n### 📈 Metrics\n- Commit frequency (commits per day)\n- Issue resolution rate\n- Average PR size\n\nKeep the summary concise but informative. Focus on what matters to the development team."
       },
-      "name": "Claude Summary",
+      "name": "Claude Weekly Summary",
       "type": "@n8n/n8n-nodes-langchain.anthropic",
       "typeVersion": 1,
-      "position": [900, 500],
+      "position": [1120, 400],
       "credentials": {
         "anthropicApi": {
-          "id": "claude-creds",
-          "name": "Claude API"
+          "id": "anthropic-creds",
+          "name": "Anthropic Account"
         }
       }
     },
     {
       "parameters": {
-        "subject": "=Weekly Dev Summary - {{ $json.repo }} - {{ $now.toFormat('yyyy-MM-dd') }}",
-        "html": "={{ $json.content }}",
-        "toEmail": "={{ $json.recipient_email }}",
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.WEBHOOK_URL }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "name": "Has Webhook?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1340, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.WEBHOOK_URL }}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "={{ $json.text }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $json.text }}"
+            }
+          ]
+        },
         "options": {}
       },
-      "name": "Send Email",
+      "name": "Send to Discord/Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.SMTP_FROM || 'noreply@example.com' }}",
+        "toEmail": "={{ $json.recipient_email }}",
+        "subject": "=Weekly Dev Summary - {{ $json.GITHUB_REPO }} - {{ $now.toFormat('yyyy-MM-dd') }}",
+        "html": "={{ $json.text }}",
+        "options": {}
+      },
+      "name": "Send via Email",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 1,
-      "position": [1120, 500],
+      "position": [1560, 500],
       "credentials": {
         "smtp": {
-          "id": "email-creds",
+          "id": "smtp-creds",
           "name": "SMTP Account"
         }
       }
     }
   ],
   "connections": {
-    "Schedule Trigger": {
+    "Weekly Trigger (Friday 5PM)": {
       "main": [
         [
           {
-            "node": "Get GitHub Issues",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Get GitHub PRs",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Get GitHub Commits",
+            "node": "Set Configuration",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Get GitHub Issues": {
+    "Set Configuration": {
       "main": [
         [
           {
-            "node": "Merge Data",
+            "node": "Get Closed Issues",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Merged PRs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Weekly Commits",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Get GitHub PRs": {
+    "Get Closed Issues": {
       "main": [
         [
           {
-            "node": "Merge Data",
+            "node": "Merge Activity Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Merged PRs": {
+      "main": [
+        [
+          {
+            "node": "Merge Activity Data",
             "type": "main",
             "index": 1
           }
         ]
       ]
     },
-    "Get GitHub Commits": {
+    "Get Weekly Commits": {
       "main": [
         [
           {
-            "node": "Merge Data",
-            "type": "main",
-            "index": 2
-          }
-        ]
-      ]
-    },
-    "Merge Data": {
-      "main": [
-        [
-          {
-            "node": "Claude Summary",
+            "node": "Merge Activity Data",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Claude Summary": {
+    "Merge Activity Data": {
       "main": [
         [
           {
-            "node": "Send Email",
+            "node": "Claude Weekly Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude Weekly Summary": {
+      "main": [
+        [
+          {
+            "node": "Has Webhook?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Webhook?": {
+      "main": [
+        [
+          {
+            "node": "Send to Discord/Slack",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send via Email",
             "type": "main",
             "index": 0
           }
@@ -205,13 +316,6 @@
   "settings": {
     "executionOrder": "v1",
     "saveManualExecutions": true,
-    "callerPolicy": "workflowsFromSameOwner",
-    "errorWorkflow": "error-handler-workflow-id"
-  },
-  "staticData": null,
-  "pinData": {},
-  "versionId": "1",
-  "meta": {
-    "instanceId": "bounty-submission"
+    "callerPolicy": "workflowsFromSameOwner"
   }
 }

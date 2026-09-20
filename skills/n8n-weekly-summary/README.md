@@ -1,56 +1,57 @@
 # n8n + Claude API — Automated Weekly Dev Summary
 
-**Bounty:** $200 — Issue #5  
-**Repo:** https://github.com/claude-builders-bounty/claude-builders-bounty/issues/5
+**Bounty:** $200 — Issue #5
 
 ## What This Delivers
 
-A complete n8n workflow that automatically generates weekly development summaries by:
-1. Fetching recent commits, issues, and PRs from GitHub
-2. Summarizing them using Claude API (Anthropic)
-3. Formatting into a structured Markdown report
-4. Sending via email (SMTP) or posting to Slack/Discord
+A complete, importable n8n workflow (`n8n-workflow.json`) that automatically generates weekly development summaries by fetching GitHub activity and summarizing it with Claude API.
 
-## Files Included
+## Quick Setup (5 Steps)
 
-- `n8n-workflow.json` — Complete n8n workflow export (ready to import)
-- `README.md` — This file with setup instructions
+1. **Import**: Open n8n → "Import from File" → select `n8n-workflow.json`
+2. **Configure**: Edit the "Set Configuration" node with your values:
+   - `GITHUB_OWNER` / `GITHUB_REPO` — target repository
+   - `ANTHROPIC_API_KEY` — your Anthropic API key
+   - `WEBHOOK_URL` — Discord or Slack webhook URL (if empty, falls back to email)
+   - `LANGUAGE` — `EN` or `FR`
+   - `recipient_email` — fallback email if no webhook
+3. **Credentials**: Add GitHub API and Anthropic credentials in n8n Settings → Credentials
+4. **Test**: Click "Execute Workflow" to verify GitHub fetching, Claude summarization, and delivery
+5. **Activate**: Toggle workflow to "Active" — runs every Friday at 5:00 PM
 
-## Setup Instructions
+## Workflow Architecture
 
-### 1. Install n8n
-```bash
-npm install -g n8n
-n8n start
+```
+[Schedule Trigger: Friday 5PM]
+        ↓
+[Set Configuration]
+   ↓    ↓    ↓
+[Closed Issues] [Merged PRs] [Commits]
+   ↓    ↓    ↓
+[Merge Activity Data]
+        ↓
+[Claude Summary (claude-sonnet-4-20250514)]
+        ↓
+   [Has Webhook?]
+   ↓ yes    ↓ no
+[Discord/Slack]  [Email]
 ```
 
-### 2. Import Workflow
-- Open n8n UI (http://localhost:5678)
-- Click "Import from File" → select `n8n-workflow.json`
-- Configure credentials (see below)
+## Configurable Variables
 
-### 3. Configure Credentials
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `GITHUB_OWNER` | GitHub org or user | `my-org` |
+| `GITHUB_REPO` | Repository name | `my-project` |
+| `ANTHROPIC_API_KEY` | Anthropic API key | `sk-ant-...` |
+| `WEBHOOK_URL` | Discord/Slack webhook | `https://hooks.slack.com/...` |
+| `LANGUAGE` | Summary language | `EN` or `FR` |
+| `recipient_email` | Email fallback | `team@example.com` |
 
-**GitHub API:**
-- Go to Settings → Credentials → Add Credential → GitHub
-- Enter your GitHub personal access token (needs `repo` scope)
+## Delivery
 
-**Claude API (Anthropic):**
-- Settings → Credentials → Add Credential → Anthropic
-- Enter your Anthropic API key
-
-**Email (SMTP):**
-- Settings → Credentials → Add Credential → SMTP
-- Configure your SMTP server (Gmail, SendGrid, etc.)
-
-### 4. Customize Parameters
-Edit the workflow nodes to set:
-- `owner` and `repo` in GitHub nodes
-- `recipient_email` in Send Email node
-- Schedule frequency (default: weekly on Monday 9 AM)
-
-### 5. Activate
-Click "Activate" on the workflow. It will run automatically every week.
+- **Primary**: Discord or Slack webhook (dual `content`/`text` payload for compatibility)
+- **Fallback**: SMTP email (configured when no webhook URL is set)
 
 ## Example Output
 
@@ -59,13 +60,12 @@ Click "Activate" on the workflow. It will run automatically every week.
 
 ### 📊 Overview
 - Total commits: 47
-- New issues: 12
-- Merged PRs: 8
+- Issues closed: 12
+- PRs merged: 8
 
 ### 🔥 Key Changes
 - Added user authentication system
 - Refactored database connection pooling
-- Fixed critical security vulnerability in login flow
 
 ### 🐛 Bug Fixes
 - Resolved timeout issue in API endpoint (#123)
@@ -73,45 +73,13 @@ Click "Activate" on the workflow. It will run automatically every week.
 
 ### ✨ New Features
 - Implemented real-time notifications
-- Added export to CSV functionality
-
-### 👀 Code Review Notes
-- Consistent use of TypeScript across new files
-- Good test coverage on critical paths
+- Added CSV export functionality
 
 ### 📈 Metrics
 - Commit frequency: 6.7/day
 - Issue resolution rate: 75%
 ```
 
-## Error Handling
-
-The workflow includes:
-- Retry logic for failed API calls (3 attempts with exponential backoff)
-- Fallback to basic summary if Claude API is unavailable
-- Error notification via email if workflow fails
-
-## Testing
-
-1. Manually trigger the workflow in n8n UI
-2. Verify GitHub data is fetched correctly
-3. Check Claude API response format
-4. Confirm email delivery
-
-## Customization
-
-- **Change frequency:** Edit Schedule Trigger node (supports cron expressions)
-- **Add Slack/Discord:** Replace Send Email node with Slack/Discord node
-- **Custom summary format:** Modify the prompt in Claude Summary node
-- **Multiple repos:** Duplicate GitHub nodes and merge results
-
-## Dependencies
-
-- n8n (self-hosted or cloud)
-- GitHub account with API access
-- Anthropic API key (Claude)
-- SMTP server or alternative notification channel
-
 ## License
 
-MIT — Free to use, modify, and distribute.
+MIT
