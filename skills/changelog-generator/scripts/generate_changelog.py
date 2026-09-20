@@ -1,157 +1,109 @@
 #!/usr/bin/env python3
-"""Generate a CHANGELOG.md from git history using conventional commit parsing."""
+"""Generate a Keep-a-Changelog document from commits after the latest tag."""
+from __future__ import annotations
 
-import subprocess
+import argparse
 import re
+import subprocess
 import sys
 from collections import defaultdict
-from datetime import datetime
+from datetime import date
+from pathlib import Path
 
-
-TYPE_MAP = {
-    'feat': 'Features',
-    'fix': 'Bug Fixes',
-    'docs': 'Documentation',
-    'refactor': 'Code Refactoring',
-    'perf': 'Performance Improvements',
-    'test': 'Tests',
-    'chore': 'Chores',
-    'style': 'Style Changes',
-    'ci': 'CI/CD',
-    'build': 'Build System',
+CATEGORY_BY_TYPE = {
+    "feat": "Added",
+    "fix": "Fixed",
+    "remove": "Removed",
+    "removed": "Removed",
+    "revert": "Removed",
 }
-
-PRIORITY_ORDER = [
-    'Features', 'Bug Fixes', 'Documentation', 'Code Refactoring',
-    'Performance Improvements', 'Tests', 'CI/CD', 'Build System',
-    'Chores', 'Style Changes',
-]
+CATEGORY_ORDER = ("Added", "Fixed", "Changed", "Removed")
+CONVENTIONAL = re.compile(r"^(?P<type>[A-Za-z][\w-]*)(?:\((?P<scope>[^)]+)\))?(?P<breaking>!)?:\s*(?P<description>.+)$")
 
 
-def get_commits(repo_path='.', limit=50, since_tag=None):
-    """Fetch recent commits from git log."""
-    cmd = ['git', 'log', '--oneline', '--no-merges']
-    if since_tag:
-        cmd.append(f'{since_tag}..HEAD')
-    else:
-        cmd.extend(['-n', str(limit)])
-    
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=repo_path)
-    if result.returncode != 0:
-        print(f"Error: {result.stderr}", file=sys.stderr)
-        return []
-    
-    return [line for line in result.stdout.strip().split('\n') if line.strip()]
+class GitError(RuntimeError):
+    pass
 
 
-def parse_commit(line):
-    """Parse a commit line into type, scope, description, and hash."""
-    parts = line.split(' ', 1)
-    if len(parts) < 2:
-        return None
-    
-    hash_part, message = parts[0], parts[1]
-    
-    # Try conventional commit formats:
-    # feat: description
-    # feat(scope): description  
-    # fix: description
-    match = re.match(r'^(\w+)(?:\(([^)]+)\))?:\s*(.+)', message)
-    if match:
-        commit_type, scope, desc = match.groups()
-        return {
-            'hash': hash_part,
-            'type': commit_type.lower(),
-            'scope': scope,
-            'description': desc.strip(),
-            'message': message.strip(),
-        }
-    
-    # Fallback: treat as uncategorized
-    return {
-        'hash': hash_part,
-        'type': None,
-        'scope': None,
-        'description': message.strip(),
-        'message': message.strip(),
-    }
+def git(repo: Path, *args: str, check: bool = True) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=repo, text=True, capture_output=True, check=False
+    )
+    if check and result.returncode:
+        raise GitError(result.stderr.strip() or "git command failed")
+    return result.stdout.rstrip("\n")
 
 
-def generate_changelog(commits, version=None, date=None):
-    """Generate CHANGELOG.md content from parsed commits."""
-    grouped = defaultdict(list)
-    other = []
-    
+def latest_tag(repo: Path) -> str | None:
+    value = git(repo, "describe", "--tags", "--abbrev=0", check=False).strip()
+    return value or None
+
+
+def get_commits(repo: Path, since_tag: str | None = None) -> tuple[str | None, list[tuple[str, str]]]:
+    """Return (range tag, commits) using NUL delimiters so subjects stay intact."""
+    boundary = since_tag if since_tag is not None else latest_tag(repo)
+    revision = f"{boundary}..HEAD" if boundary else "HEAD"
+    raw = git(repo, "log", "--no-merges", "--format=%h%x00%s%x00", revision)
+    fields = raw.split("\x00") if raw else []
+    if fields and fields[-1] == "":
+        fields.pop()
+    if len(fields) % 2:
+        raise GitError("unexpected git log output")
+    return boundary, list(zip(fields[0::2], fields[1::2]))
+
+
+def parse_commit(short_hash: str, subject: str) -> dict[str, str | None]:
+    match = CONVENTIONAL.match(subject.strip())
+    if not match:
+        return {"hash": short_hash, "category": "Changed", "scope": None, "description": subject.strip()}
+    commit_type = match.group("type").lower()
+    category = CATEGORY_BY_TYPE.get(commit_type, "Changed")
+    description = match.group("description").strip()
+    if match.group("breaking"):
+        description += " **(breaking)**"
+    return {"hash": short_hash, "category": category, "scope": match.group("scope"), "description": description}
+
+
+def render(commits: list[dict[str, str | None]], version: str = "Unreleased", release_date: str | None = None) -> str:
+    grouped: dict[str, list[str]] = defaultdict(list)
     for commit in commits:
-        if commit is None:
-            continue
-            
-        category = TYPE_MAP.get(commit['type'])
-        
-        if category:
-            entry = f"- {commit['description']} ({commit['hash']})"
-            if commit['scope']:
-                entry = f"- **{commit['scope']}**: {commit['description']} ({commit['hash']})"
-            grouped[category].append(entry)
-        else:
-            other.append(f"- {commit['message']} ({commit['hash']})")
-    
-    # Build output
-    lines = ['# Changelog', '']
-    
-    # Version header
-    ver = version or 'Unreleased'
-    dt = date or datetime.now().strftime('%Y-%m-%d')
-    if ver == 'Unreleased':
-        lines.append(f'## [{ver}]')
-    else:
-        lines.append(f'## [{ver}] - {dt}')
-    lines.append('')
-    
-    # Categorized sections
-    for category in PRIORITY_ORDER:
-        if category in grouped:
-            lines.append(f'### {category}')
-            lines.append('')
-            for entry in grouped[category]:
-                lines.append(entry)
-            lines.append('')
-    
-    # Uncategorized
-    if other:
-        lines.append('### Other Changes')
-        lines.append('')
-        for entry in other:
-            lines.append(entry)
-        lines.append('')
-    
-    return '\n'.join(lines)
+        scope = f"**{commit['scope']}**: " if commit["scope"] else ""
+        grouped[str(commit["category"])].append(f"- {scope}{commit['description']} ({commit['hash']})")
+
+    heading = f"## [{version}]"
+    if version != "Unreleased":
+        heading += f" - {release_date or date.today().isoformat()}"
+    lines = ["# Changelog", "", heading, ""]
+    for category in CATEGORY_ORDER:
+        lines.extend([f"### {category}", ""])
+        lines.extend(grouped.get(category, ["- No changes."]))
+        lines.append("")
+    return "\n".join(lines)
 
 
-def main():
-    import argparse
-    parser = argparse.ArgumentParser(description='Generate CHANGELOG.md from git history')
-    parser.add_argument('--limit', type=int, default=50, help='Max commits to include')
-    parser.add_argument('--since-tag', help='Generate changelog since this tag')
-    parser.add_argument('--version', help='Version string for the header')
-    parser.add_argument('--output', '-o', help='Output file (default: stdout)')
-    parser.add_argument('--repo', default='.', help='Repository path')
-    
-    args = parser.parse_args()
-    
-    commits_raw = get_commits(args.repo, args.limit, args.since_tag)
-    commits = [parse_commit(line) for line in commits_raw]
-    
-    date_str = datetime.now().strftime('%Y-%m-%d')
-    changelog = generate_changelog(commits, args.version, date_str)
-    
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Generate CHANGELOG.md from commits after the latest git tag")
+    parser.add_argument("--repo", type=Path, default=Path.cwd())
+    parser.add_argument("--since-tag", help="override the automatically detected latest tag")
+    parser.add_argument("--version", default="Unreleased")
+    parser.add_argument("--date", dest="release_date")
+    parser.add_argument("-o", "--output", type=Path, help="write to this path; otherwise print to stdout")
+    args = parser.parse_args(argv)
+
+    try:
+        _boundary, raw_commits = get_commits(args.repo.resolve(), args.since_tag)
+    except GitError as exc:
+        print(f"generate-changelog: {exc}", file=sys.stderr)
+        return 2
+    content = render([parse_commit(*item) for item in raw_commits], args.version, args.release_date)
     if args.output:
-        with open(args.output, 'w') as f:
-            f.write(changelog)
-        print(f"Written {args.output}")
+        output = args.output if args.output.is_absolute() else args.repo / args.output
+        output.write_text(content, encoding="utf-8")
+        print(f"Wrote {output}")
     else:
-        print(changelog)
+        print(content, end="")
+    return 0
 
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    raise SystemExit(main())

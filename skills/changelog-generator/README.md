@@ -1,42 +1,14 @@
-# Changelog Generator Skill
+# Changelog Generator
 
-Generates a structured `CHANGELOG.md` from git commit history using conventional commit parsing.
+Generates a Keep-a-Changelog `CHANGELOG.md` from every non-merge commit after the latest reachable Git tag. Conventional commits map to the contract's literal `Added`, `Fixed`, `Changed`, and `Removed` sections; non-conventional commits are retained under `Changed`.
 
-## Usage
+## Setup and use (2 steps)
 
-```bash
-python scripts/generate_changelog.py --limit 50 --repo /path/to/repo
-python scripts/generate_changelog.py --since-tag v1.0.0 --version v1.1.0 -o CHANGELOG.md
-```
+1. Make the command executable: `chmod +x skills/changelog-generator/changelog.sh`
+2. From any Git repository run: `/path/to/skills/changelog-generator/changelog.sh` (or pass the repository path as its only argument)
 
-## Acceptance Criteria
+The command writes `CHANGELOG.md` in the target repository. Advanced use can call `scripts/generate_changelog.py` with `--since-tag`, `--version`, `--date`, and `--output`.
 
-- [x] Parses conventional commit format (`feat:`, `fix(scope):`, etc.)
-- [x] Groups commits by type (Features, Bug Fixes, Documentation, etc.)
-- [x] Formats output in Keep a Changelog style
-- [x] Supports tag-based ranges and custom version headers
-- [x] Falls back gracefully for non-conventional commits
-- [x] Produces deterministic output for identical input
+## Verification
 
-## Example Output
-
-```markdown
-# Changelog
-
-## [Unreleased]
-
-### Features
-
-- freeze legacy trader and add TradingAgents Binance shadow probe (afb06cb)
-
-### Other Changes
-
-- commerce: record Tenor bounty mechanism test (a0d5e86)
-- evidence: reconcile RustChain and MoltJobs at 22:10 WITA (12cae7a)
-```
-
-## Files
-
-- `SKILL.md` — Agent skill definition
-- `scripts/generate_changelog.py` — Implementation
-- `README.md` — This file
+Run `python3 -m pytest -q skills/changelog-generator/tests`. The regression suite creates real temporary Git repositories, tags and commits, then runs the same Bash entry point a user runs. `SAMPLE_OUTPUT.md` records output from a public real repository.

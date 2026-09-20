@@ -1,69 +1,88 @@
 #!/usr/bin/env python3
-"""Tests for changelog generator."""
+from __future__ import annotations
 
+import subprocess
 import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
+from pathlib import Path
 
-from generate_changelog import parse_commit, generate_changelog
-
-
-def test_parse_conventional_commit():
-    """Test parsing standard conventional commit format."""
-    result = parse_commit("abc123 feat: add user authentication")
-    assert result['type'] == 'feat'
-    assert result['description'] == 'add user authentication'
-    assert result['hash'] == 'abc123'
-    print("✓ parse_conventional_commit passed")
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from generate_changelog import get_commits, parse_commit, render  # noqa: E402
 
 
-def test_parse_scoped_commit():
-    """Test parsing commit with scope."""
-    result = parse_commit("def456 fix(auth): resolve login timeout")
-    assert result['type'] == 'fix'
-    assert result['scope'] == 'auth'
-    assert result['description'] == 'resolve login timeout'
-    print("✓ parse_scoped_commit passed")
+def run(repo: Path, *args: str) -> None:
+    subprocess.run(args, cwd=repo, check=True, text=True, capture_output=True)
 
 
-def test_parse_non_conventional():
-    """Test fallback for non-conventional commits."""
-    result = parse_commit("ghi789 updated README file")
-    assert result['type'] is None
-    assert result['description'] == 'updated README file'
-    print("✓ parse_non_conventional passed")
+def commit(repo: Path, message: str, filename: str) -> None:
+    (repo / filename).write_text(message, encoding="utf-8")
+    run(repo, "git", "add", filename)
+    run(repo, "git", "commit", "-m", message)
 
 
-def test_generate_changelog_groups():
-    """Test that commits are grouped by type."""
+def test_literal_contract_categories():
     commits = [
-        parse_commit("a1 feat: add login"),
-        parse_commit("b2 fix: resolve crash"),
-        parse_commit("c3 docs: update readme"),
+        parse_commit("a1", "feat(api): add endpoint"),
+        parse_commit("b2", "fix: stop crash"),
+        parse_commit("c3", "refactor: simplify parser"),
+        parse_commit("d4", "remove: legacy mode"),
     ]
-    output = generate_changelog(commits)
-    assert '### Features' in output
-    assert '### Bug Fixes' in output
-    assert '### Documentation' in output
-    assert 'add login' in output
-    assert 'resolve crash' in output
-    print("✓ generate_changelog_groups passed")
+    output = render(commits)
+    for section in ("Added", "Fixed", "Changed", "Removed"):
+        assert f"### {section}" in output
+    assert "**api**: add endpoint" in output
 
 
-def test_generate_changelog_format():
-    """Test output format matches Keep a Changelog style."""
-    commits = [parse_commit("x1 feat: test feature")]
-    output = generate_changelog(commits, version='v1.0.0', date='2026-09-19')
-    assert '# Changelog' in output
-    assert '## [v1.0.0] - 2026-09-19' in output
-    assert '- test feature (x1)' in output
-    print("✓ generate_changelog_format passed")
+def test_real_git_path_uses_latest_reachable_tag(tmp_path: Path):
+    repo = tmp_path / "project"
+    repo.mkdir()
+    run(repo, "git", "init", "-q")
+    run(repo, "git", "config", "user.email", "test@example.com")
+    run(repo, "git", "config", "user.name", "Test User")
+    commit(repo, "feat: before release", "old.txt")
+    run(repo, "git", "tag", "v1.0.0")
+    commit(repo, "fix: after release", "fix.txt")
+    commit(repo, "docs: explain behavior", "docs.txt")
+
+    boundary, rows = get_commits(repo)
+    assert boundary == "v1.0.0"
+    assert [subject for _, subject in rows] == ["docs: explain behavior", "fix: after release"]
+    assert "before release" not in render([parse_commit(*row) for row in rows])
 
 
-if __name__ == '__main__':
-    test_parse_conventional_commit()
-    test_parse_scoped_commit()
-    test_parse_non_conventional()
-    test_generate_changelog_groups()
-    test_generate_changelog_format()
-    print("\nAll tests passed ✓")
+def test_repository_without_tags_uses_full_history(tmp_path: Path):
+    repo = tmp_path / "untagged"
+    repo.mkdir()
+    run(repo, "git", "init", "-q")
+    run(repo, "git", "config", "user.email", "test@example.com")
+    run(repo, "git", "config", "user.name", "Test User")
+    commit(repo, "initial import", "one.txt")
+    boundary, rows = get_commits(repo)
+    assert boundary is None
+    assert len(rows) == 1
+    assert parse_commit(*rows[0])["category"] == "Changed"
+
+
+def test_bash_user_path_writes_changelog(tmp_path: Path):
+    repo = tmp_path / "user-project"
+    repo.mkdir()
+    run(repo, "git", "init", "-q")
+    run(repo, "git", "config", "user.email", "test@example.com")
+    run(repo, "git", "config", "user.name", "Test User")
+    commit(repo, "feat: usable command", "feature.txt")
+    subprocess.run(["bash", str(ROOT / "changelog.sh"), str(repo)], cwd=repo, check=True, text=True, capture_output=True)
+    output = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "### Added" in output and "usable command" in output
+
+
+def test_invalid_tag_fails_instead_of_false_success(tmp_path: Path):
+    repo = tmp_path / "project"
+    repo.mkdir()
+    run(repo, "git", "init", "-q")
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/generate_changelog.py"), "--repo", str(repo), "--since-tag", "missing"],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode != 0
+    assert "unknown revision" in result.stderr.lower() or "ambiguous argument" in result.stderr.lower()

@@ -1,6 +1,6 @@
 ---
 name: changelog-generator
-description: "Generate a structured CHANGELOG.md from git history by extracting conventional commits, grouping by type (feat/fix/chore/docs/refactor), and formatting with semantic versioning headers."
+description: "Generate a structured CHANGELOG.md from git history by extracting conventional commits, grouping into Added/Fixed/Changed/Removed, and formatting with semantic versioning headers."
 ---
 
 # Changelog Generator
@@ -13,7 +13,7 @@ Generate a clean, readable `CHANGELOG.md` from a Git repository's commit history
 
 1. **Read repository state.**
    - Run `git log --oneline --no-merges` to get recent commit history.
-   - Identify the last tag or use `HEAD~N` as the range boundary.
+   - Identify the latest reachable tag automatically; if none exists, use the full history.
    - **Done when:** you have a list of commits with hashes, dates, and messages.
 
 2. **Parse conventional commits.**
@@ -24,7 +24,7 @@ Generate a clean, readable `CHANGELOG.md` from a Git repository's commit history
 
 3. **Group by type and sort.**
    - Group commits under their type header.
-   - Order types by priority: `feat` > `fix` > `docs` > `refactor` > `perf` > `test` > `chore` > `style`.
+   - Emit the literal contract sections in order: `Added`, `Fixed`, `Changed`, `Removed`.
    - Within each group, sort by date descending (newest first).
    - **Done when:** commits are organized into categorized sections.
 
@@ -32,7 +32,7 @@ Generate a clean, readable `CHANGELOG.md` from a Git repository's commit history
    - Write a `CHANGELOG.md` with:
      - Title: `# Changelog`
      - Version header: `## [Unreleased]` or `## [vX.Y.Z] - YYYY-MM-DD` if a tag exists.
-     - Type sections: `### Features`, `### Bug Fixes`, `### Documentation`, etc.
+     - Type sections: `### Added`, `### Fixed`, `### Changed`, and `### Removed`.
      - Each entry: `- <description> (<short-hash>)`
    - Include an `[Unreleased]` section at top if no tag found.
    - **Done when:** the file follows standard Keep a Changelog format.
@@ -47,5 +47,4 @@ Generate a clean, readable `CHANGELOG.md` from a Git repository's commit history
 
 - If the repo has no conventional commits, fall back to listing all commits under `### Other Changes`.
 - Preserve author attribution if requested: include `(Author Name)` after the hash.
-- For large histories (>100 commits), limit to the last 50 unless a specific range is provided.
-- Do not modify existing `CHANGELOG.md` content; append new entries only if the file already exists.
+- The Bash user command writes `CHANGELOG.md` deterministically for the current post-tag history.
