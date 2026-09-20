@@ -21,10 +21,17 @@ def metadata(**extra):
 def patch_for(files=("src/a.py", "tests/test_a.py"), added=("one", "two"), deleted=()):
     chunks = []
     for name in files:
-        old = len(deleted) or 0
-        new = len(added) or 0
-        lines = [f"diff --git a/{name} b/{name}", f"--- a/{name}", f"+++ b/{name}",
-                 f"@@ -1,{max(old, 1)} +1,{max(new, 1)} @@"]
+        old = len(deleted)
+        new = len(added)
+        if old and new:
+            hunk = f"@@ -1,{old} +1,{new} @@"
+        elif old:
+            hunk = f"@@ -1,{old} +0,0 @@"
+        else:
+            hunk = f"@@ -0,0 +1,{new} @@"
+        lines = [f"diff --git a/{name} b/{name}",
+                 "--- /dev/null" if not old else f"--- a/{name}",
+                 "+++ /dev/null" if not new else f"+++ b/{name}", hunk]
         lines += [f"-{line}" for line in deleted] + [f"+{line}" for line in added]
         chunks.append("\n".join(lines) + "\n")
     return "".join(chunks)
@@ -50,6 +57,26 @@ def test_small_clean_change_never_gets_easy_high_confidence():
     assert analysis["reviewable"] is True
     assert "**Confidence:** Medium" in output
     assert "**Confidence:** High" not in output
+
+
+def test_confidence_is_semantic_not_a_schema_decoration():
+    # A mutation that unconditionally returns High must fail these gates.
+    cases = [
+        (patch_for(("tests/test_a.py",), added=("one", "two")), metadata(additions=2, deletions=0, changedFiles=1)),
+        (patch_for(("src/a.py", "tests/test_a.py"), added=tuple(f"line{i}" for i in range(12))),
+         metadata(additions=24, deletions=0, changedFiles=2)),
+        (patch_for(("generated/app.js", "tests/test_a.py"), added=tuple(f"line{i}" for i in range(12))),
+         metadata(additions=24, deletions=0, changedFiles=2)),
+    ]
+    for index, (patch, meta) in enumerate(cases):
+        analysis, output = report(meta, patch)
+        level = reviewer.confidence_level(analysis, reviewer._metadata_context(meta, analysis)[1])
+        if index == 1:
+            assert level == "High"
+            assert "**Confidence:** High" in output
+        else:
+            assert level != "High"
+            assert "**Confidence:** High" not in output
 
 
 def test_metadata_is_not_authoritative_when_partial_or_mismatched():
@@ -92,6 +119,32 @@ def test_malformed_diff_is_safe_failure_not_a_polished_review():
     assert analysis["reviewable"] is False
     assert "unsafe input" in output
     assert "No security analysis performed" in output
+
+
+def test_hunk_counts_and_file_headers_are_strictly_validated():
+    valid = ("diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n"
+             "@@ -1,1 +1,2 @@\n-old\n+new\n+another\n")
+    assert reviewer.finalize_analysis(reviewer.analyze_diff(valid), valid)["reviewable"]
+
+    truncated = valid.replace("+another\n", "")
+    analysis, output = report(metadata(additions=1, deletions=1, changedFiles=1), truncated)
+    assert analysis["malformed"] is True
+    assert analysis["reviewable"] is False
+    assert "unsafe input" in output
+
+    missing_headers = ("diff --git a/src/a.py b/src/a.py\n@@ -0,0 +1,1 @@\n+new\n")
+    analysis, _ = report(metadata(additions=1, deletions=0, changedFiles=1), missing_headers)
+    assert analysis["malformed"] is True
+    assert analysis["reviewable"] is False
+
+
+def test_action_does_not_interpolate_or_allow_output_path_escape():
+    action = (Path(__file__).parents[1] / "action.yml").read_text()
+    assert '--output "$OUTPUT_FILE"' in action
+    assert 'cat -- "$OUTPUT_FILE"' in action
+    assert '--output ${{ inputs.output_file }}' not in action
+    assert 'cat ${{ inputs.output_file }}' not in action
+    assert 'output_file must be a non-empty path inside the workspace' in action
 
 
 def test_binary_generated_and_large_changes_are_explicitly_uncertain():

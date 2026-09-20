@@ -91,16 +91,34 @@ def _is_generated_or_vendor(path: str) -> bool:
             "/generated/" in f"/{lower}" or lower.endswith((".min.js", ".min.css")))
 
 
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?:.*)$")
+
+
+def _path_from_header(value: str, prefix: str) -> str | None:
+    """Return a conventional ---/+++ path, or None for an invalid header."""
+    if value == "/dev/null":
+        return value
+    if not value.startswith(prefix):
+        return None
+    path = value[len(prefix):].split("\t", 1)[0]
+    return path if path else None
+
+
 def analyze_diff(diff_text: str) -> dict:
-    """Parse a unified patch and inspect only added, attributable lines."""
+    """Parse a complete unified patch and inspect only attributable additions.
+
+    A hunk is accepted only when its observed context/add/delete lines exactly
+    match both counts in its header. This rejects truncated or hand-edited
+    patches instead of reviewing a misleading prefix.
+    """
     result = {"files_changed": [], "file_status": {}, "total_additions": 0,
               "total_deletions": 0, "security_flags": [], "security_notes": [],
               "has_tests": False, "has_docs": False, "generated_files": [],
               "malformed": False, "parse_warnings": [], "reviewable": False,
               "trivial_reason": "", "total_changed_lines": 0}
     current = None
-    in_hunk = False
-    saw_header = False
+    current_state = None
+    hunk = None
     secret_patterns = [
         (r"(?i)\b(password|passwd|secret|api[_-]?key|private[_-]?key)\s*[:=]\s*['\"][^'\"]+['\"]", "Hardcoded credential"),
         (r"(?i)\b(token|access_token)\s*[:=]\s*['\"][A-Za-z0-9_./+=-]{12,}['\"]", "Hardcoded access token"),
@@ -108,50 +126,122 @@ def analyze_diff(diff_text: str) -> dict:
         (r"(?i)\bsubprocess\.(call|run|Popen)\s*\(.*\bshell\s*=\s*True", "Shell injection risk"),
         (r"(?i)\bos\.system\s*\(", "Command injection risk"),
     ]
+
+    def warn(message: str) -> None:
+        result["malformed"] = True
+        result["parse_warnings"].append(message)
+
+    def finish_hunk() -> None:
+        nonlocal hunk
+        if hunk is not None:
+            if (hunk["old_seen"] != hunk["old_expected"] or
+                    hunk["new_seen"] != hunk["new_expected"]):
+                warn(f"hunk counts do not match in {current or 'unknown file'}")
+            hunk = None
+
+    def finish_file() -> None:
+        nonlocal current, current_state
+        finish_hunk()
+        if current_state is not None and not current_state["binary"]:
+            if not current_state["old_header"] or not current_state["new_header"]:
+                warn(f"text patch for {current or 'unknown file'} lacks ---/+++ headers")
+            if (current_state["old_path"] == "/dev/null" and
+                    current_state["new_path"] == "/dev/null"):
+                warn(f"text patch for {current or 'unknown file'} has no file side")
+            if not current_state["saw_hunk"]:
+                warn(f"text patch for {current or 'unknown file'} has no hunk")
+        current = None
+        current_state = None
+
     for raw in diff_text.splitlines():
         if raw.startswith("diff --git "):
+            finish_file()
             match = re.match(r"diff --git a/(.+) b/(.+)$", raw)
             current = match.group(2) if match else None
-            in_hunk = False
-            saw_header = bool(match)
+            current_state = {"old_header": False, "new_header": False,
+                             "old_path": None, "new_path": None,
+                             "saw_hunk": False, "binary": False,
+                             "old_diff": match.group(1) if match else None,
+                             "new_diff": match.group(2) if match else None}
             if not match:
-                result["malformed"] = True
-                result["parse_warnings"].append("an unreadable diff header was found")
+                warn("an unreadable diff header was found")
             elif current not in result["files_changed"]:
                 result["files_changed"].append(current)
                 result["file_status"][current] = "modified"
             continue
-        if raw.startswith("--- ") and current and raw[4:] == "/dev/null":
-            result["file_status"][current] = "added"
-        elif raw.startswith("+++ ") and current and raw[4:] == "/dev/null":
-            result["file_status"][current] = "deleted"
-        if raw.startswith("@@"):
-            in_hunk = bool(re.match(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", raw))
-            if not in_hunk:
-                result["malformed"] = True
-                result["parse_warnings"].append(f"malformed hunk in {current or 'unknown file'}")
+
+        if current_state is None:
+            if raw.strip():
+                warn("content appeared outside a file patch")
+            continue
+
+        if raw.startswith("--- ") and hunk is None:
+            path = _path_from_header(raw[4:], "a/")
+            if path is None:
+                warn(f"invalid --- header in {current}")
+            else:
+                expected = current_state["old_diff"]
+                if path not in (expected, "/dev/null"):
+                    warn(f"--- header path does not match diff header in {current}")
+                current_state["old_path"] = path
+                current_state["old_header"] = True
+                if path == "/dev/null":
+                    result["file_status"][current] = "added"
+            continue
+        if raw.startswith("+++ ") and hunk is None:
+            path = _path_from_header(raw[4:], "b/")
+            if path is None:
+                warn(f"invalid +++ header in {current}")
+            else:
+                expected = current_state["new_diff"]
+                if path not in (expected, "/dev/null"):
+                    warn(f"+++ header path does not match diff header in {current}")
+                current_state["new_path"] = path
+                current_state["new_header"] = True
+                if path == "/dev/null":
+                    result["file_status"][current] = "deleted"
             continue
         if raw.startswith(("Binary files ", "GIT binary patch")):
-            if current:
-                result["parse_warnings"].append(f"binary content in {current} was not line-inspected")
+            finish_hunk()
+            current_state["binary"] = True
+            result["parse_warnings"].append(f"binary content in {current} was not line-inspected")
             continue
-        if not in_hunk or raw.startswith(("---", "+++")):
+        if raw.startswith("@@"):
+            finish_hunk()
+            match = _HUNK_RE.match(raw)
+            if not match:
+                warn(f"malformed hunk in {current}")
+                continue
+            hunk = {"old_expected": int(match.group(2) or "1"),
+                    "new_expected": int(match.group(4) or "1"),
+                    "old_seen": 0, "new_seen": 0}
+            current_state["saw_hunk"] = True
             continue
-        if not raw or raw[0] not in " +-\\":
-            result["malformed"] = True
-            result["parse_warnings"].append(f"unprefixed content in {current or 'unknown file'}")
+        if hunk is None:
+            if raw.startswith(("index ", "old mode ", "new mode ", "similarity ", "rename ", "copy ")):
+                continue
+            if raw.strip():
+                warn(f"unexpected content outside hunk in {current}")
             continue
         if raw.startswith("\\ No newline"):
             continue
-        if raw.startswith("-"):
+        if not raw or raw[0] not in " +-":
+            warn(f"unprefixed content in {current}")
+            continue
+        if raw[0] == " ":
+            hunk["old_seen"] += 1
+            hunk["new_seen"] += 1
+            continue
+        if raw[0] == "-":
+            hunk["old_seen"] += 1
             if raw[1:].strip():
                 result["total_deletions"] += 1
             continue
-        if not raw.startswith("+"):
-            continue
+        # The only remaining valid hunk marker is '+'.
         result["total_additions"] += 1
+        hunk["new_seen"] += 1
         if not current:
-            result["malformed"] = True
+            warn("addition has no file path")
             continue
         if _is_test(current):
             result["has_tests"] = True
@@ -166,15 +256,13 @@ def analyze_diff(diff_text: str) -> dict:
             continue
         for pattern, label in secret_patterns:
             if re.search(pattern, added):
-                # A rendered report/example in source is not itself a credential.
                 if "hardcoded credential" in added.lower() and "password =" in added.lower():
                     result["security_notes"].append(f"possible example text in {current}; not treated as a finding")
                     continue
                 result["security_flags"].append({"file": current, "label": label,
                                                   "line": added[:160]})
-    result["has_tests"] = result["has_tests"]
+    finish_file()
     return result
-
 
 def finalize_analysis(analysis: dict, diff_text: str) -> dict:
     changed = analysis["total_additions"] + analysis["total_deletions"]
@@ -210,6 +298,17 @@ def _metadata_context(metadata: dict, analysis: dict) -> tuple[str, list[str]]:
     return ("; ".join(uncertainty), uncertainty)
 
 
+def confidence_level(analysis: dict, uncertainties: list[str]) -> str:
+    """Apply semantic gates; High is possible only with complete evidence."""
+    if (analysis["security_flags"] or analysis["generated_files"] or
+            uncertainties or not analysis["has_tests"]):
+        return "Low" if analysis["security_flags"] or analysis["generated_files"] else "Medium"
+    if (analysis["total_additions"] + analysis["total_deletions"] >= 20 and
+            len(analysis["files_changed"]) >= 2):
+        return "High"
+    return "Medium"
+
+
 def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None = None) -> str:
     title = metadata.get("title") if isinstance(metadata.get("title"), str) else "Unknown PR"
     additions = diff_analysis["total_additions"]
@@ -236,8 +335,7 @@ def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None =
         assessment = "⚠️ Needs revision before merge"
     else:
         assessment = "✅ Looks good with minor suggestions"
-    confidence = "Low" if issues or diff_analysis["generated_files"] else (
-        "High" if not uncertainties and additions + deletions >= 20 and changed >= 2 and diff_analysis["has_tests"] else "Medium")
+    confidence = confidence_level(diff_analysis, uncertainties)
     lines = ["## PR Review Report", "", "### 📋 Summary", f"- **PR:** {title}",
              f"- **Diff evidence:** {changed} file(s), +{additions}/-{deletions} lines (from the patch).",
              f"- **Overall assessment:** {assessment}", f"- **Confidence:** {confidence}", ""]

@@ -39,13 +39,15 @@ python skills/pr-reviewer/scripts/generate_review.py \\
   --output report.md
 ```
 
-Run the command from the repository root (the path above is root-relative). It uses `gh` when available and otherwise reads public PR metadata/diffs through GitHub's unauthenticated API; no token or secret is written to reports. Invalid or inaccessible PRs and malformed local inputs fail cleanly without a traceback. The patch is authoritative for changed files and line counts; missing or mismatched metadata is called out as uncertainty, never silently treated as fact. Empty, one-line/trivial, malformed, and binary-only diffs produce an explicit no-review result rather than a polished normal review.
+Run the command from the repository root (the path above is root-relative). It uses `gh` when available and otherwise reads public PR metadata/diffs through GitHub's unauthenticated API; no token or secret is written to reports. Invalid or inaccessible PRs and malformed local inputs fail cleanly without a traceback. The patch is authoritative for changed files and line counts; every unified-diff hunk must have matching declared and observed old/new line counts and reviewable text patches must include matching `---`/`+++` headers. Missing or mismatched metadata is called out as uncertainty, never silently treated as fact. Empty, one-line/trivial, malformed, and binary-only diffs produce an explicit no-review result rather than a polished normal review.
 
 For offline/reproducible runs, metadata and diff files are also supported. Capture those inputs from the public PR at a pinned revision and commit only sanitized fixtures; never commit credentials:
 
 ```bash
 python skills/pr-reviewer/scripts/generate_review.py --metadata pr_metadata.json --diff pr_diff.patch -o report.md
 ```
+
+The GitHub Action accepts workspace-relative `output_file` paths (including nested paths), and rejects absolute paths, `..` escapes, and symlink escapes before writing or uploading a report. Shell arguments are passed through environment variables and quoting; posting remains opt-in.
 
 For exact-candidate audit artifacts, optionally bind the report to `--candidate-sha`, `--worktree`, `--clean`, `--evidence-for-sha`, and `--audit-for-sha`. These values are recorded as evidence labels; they are not inferred or treated as proof by the reviewer.
 
