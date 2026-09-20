@@ -158,16 +158,29 @@ def test_truncated_git_binary_patch_is_rejected_as_malformed():
     assert "no payload" in output
 
 
-def test_git_binary_payload_structure_and_sizes_are_validated():
-    valid = ("diff --git a/x.bin b/x.bin\n"
-             "GIT binary patch\n"
-             "literal 4\n"
-             "D00000\n")
-    analysis, _ = report(metadata(additions=0, deletions=0, changedFiles=1), valid)
+def test_real_git_binary_payload_is_accepted_and_truncation_rejected(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    blob = repo / "x.bin"
+    blob.write_bytes(bytes(range(256)) * 16 + b" braces {}")
+    subprocess.run(["git", "-C", str(repo), "add", "x.bin"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "before"], check=True)
+    blob.write_bytes(bytes(reversed(range(256))) * 16 + b" changed {}")
+    patch = subprocess.check_output(["git", "-C", str(repo), "diff", "--binary", "HEAD"], text=True)
+    assert "GIT binary patch" in patch
+    assert "{" in patch and "}" in patch
+
+    analysis, _ = report(metadata(additions=0, deletions=0, changedFiles=1), patch)
     assert analysis["input_state"] == "limited"
     assert analysis["reviewable"] is False
 
-    truncated = valid.replace("D00000", "D0000")
+    truncated_lines = patch.splitlines()
+    payload_index = max(index for index, line in enumerate(truncated_lines) if line)
+    truncated_lines[payload_index] = truncated_lines[payload_index][:-1]
+    truncated = "\n".join(truncated_lines) + "\n"
     analysis, output = report(metadata(changedFiles=1), truncated)
     assert analysis["input_state"] == "rejected"
     assert "truncated or malformed" in output

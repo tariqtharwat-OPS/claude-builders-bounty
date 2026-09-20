@@ -13,6 +13,7 @@ import posixpath
 import re
 import subprocess
 import sys
+import zlib
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -159,12 +160,99 @@ def _diff_paths(header: str) -> tuple[str, str] | None:
 
 
 _GIT_BINARY_ALPHABET = set(
-    "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`|~"
+    "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~"
+)
+_GIT_BINARY_ALPHABET_STRING = (
+    "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~"
 )
 
 
+def _decode_git_base85(encoded: str, length: int) -> bytes | None:
+    """Decode one Git binary-patch payload line (not RFC 1924 base85)."""
+    payload = encoded[1:]
+    decoded = bytearray()
+    for offset in range(0, len(payload), 5):
+        group = payload[offset:offset + 5]
+        if len(group) != 5:
+            return None
+        value = 0
+        for char in group:
+            value = value * 85 + _GIT_BINARY_ALPHABET_STRING.index(char)
+        decoded.extend(value.to_bytes(4, "big"))
+    return bytes(decoded[:length]) if len(decoded) >= length else None
+
+
+def _inflate_git_payload(payload: bytes) -> bytes | None:
+    """Inflate exactly one complete zlib stream, rejecting truncation/trailing data."""
+    try:
+        stream = zlib.decompressobj()
+        result = stream.decompress(payload)
+        result += stream.flush()
+        if not stream.eof or stream.unused_data or stream.unconsumed_tail:
+            return None
+        return result
+    except zlib.error:
+        return None
+
+
+def _read_git_varint(data: bytes, offset: int) -> tuple[int, int] | None:
+    value = 0
+    shift = 0
+    while offset < len(data) and shift <= 63:
+        byte = data[offset]
+        offset += 1
+        value |= (byte & 0x7f) << shift
+        if not byte & 0x80:
+            return value, offset
+        shift += 7
+    return None
+
+
+def _validate_git_delta(inflated: bytes, expected: int) -> bool:
+    """Validate delta framing and its declared result size without a source blob."""
+    source = _read_git_varint(inflated, 0)
+    if source is None:
+        return False
+    result = _read_git_varint(inflated, source[1])
+    if result is None or result[0] != expected:
+        return False
+    offset = result[1]
+    produced = 0
+    while offset < len(inflated):
+        opcode = inflated[offset]
+        offset += 1
+        if opcode & 0x80:
+            copy_offset = 0
+            copy_size = 0
+            for bit, shift in ((1, 0), (2, 8), (4, 16), (8, 24)):
+                if opcode & bit:
+                    if offset >= len(inflated):
+                        return False
+                    copy_offset |= inflated[offset] << shift
+                    offset += 1
+            for bit, shift in ((16, 0), (32, 8), (64, 16)):
+                if opcode & bit:
+                    if offset >= len(inflated):
+                        return False
+                    copy_size |= inflated[offset] << shift
+                    offset += 1
+            produced += copy_size or 0x10000
+        elif opcode:
+            if offset + opcode > len(inflated):
+                return False
+            offset += opcode
+            produced += opcode
+        else:
+            return False
+    return produced == expected
+
+
 def _validate_git_binary_payload(lines: list[str]) -> str | None:
-    """Validate the framed, size-delimited payload emitted by ``git diff --binary``."""
+    """Validate the framed, size-delimited payload emitted by ``git diff --binary``.
+
+    Git's ``literal N`` is the *uncompressed* file size. The base85 payload is
+    zlib-compressed, so its decoded byte count is not compared to N.
+    """
     if not lines:
         return "GIT binary patch has no payload"
     index = 0
@@ -175,7 +263,7 @@ def _validate_git_binary_payload(lines: list[str]) -> str | None:
             return "GIT binary patch has an invalid literal/delta header"
         expected = int(match.group(1))
         index += 1
-        decoded = 0
+        decoded = bytearray()
         payload_lines = 0
         while index < len(lines) and lines[index] != "":
             encoded = lines[index]
@@ -187,16 +275,27 @@ def _validate_git_binary_payload(lines: list[str]) -> str | None:
                 return "GIT binary patch has a truncated or malformed payload line"
             if any(char not in _GIT_BINARY_ALPHABET for char in encoded[1:]):
                 return "GIT binary patch has invalid base85 payload characters"
-            decoded += length
+            chunk = _decode_git_base85(encoded, length)
+            if chunk is None:
+                return "GIT binary patch has a truncated or malformed payload line"
+            decoded.extend(chunk)
             payload_lines += 1
             index += 1
-        if decoded != expected or (expected and not payload_lines):
-            return "GIT binary patch payload length does not match its declared size"
+        if expected and not payload_lines:
+            return "GIT binary patch payload has no data"
+        inflated = _inflate_git_payload(bytes(decoded))
+        if inflated is None:
+            return "GIT binary patch has a truncated or malformed compressed payload"
+        header_kind = lines[index - payload_lines - 1].split(" ", 1)[0]
+        if header_kind == "literal" and len(inflated) != expected:
+            return "GIT binary patch literal size does not match inflated payload"
+        if header_kind == "delta" and not _validate_git_delta(inflated, expected):
+            return "GIT binary patch delta size or instructions are malformed"
         sections += 1
         if index < len(lines):
+            # A final blank line is the normal separator before the patch's
+            # trailing newline; it does not imply another payload section.
             index += 1
-            if index == len(lines):
-                return "GIT binary patch ends between payload sections"
     return None if sections else "GIT binary patch has no payload sections"
 
 
