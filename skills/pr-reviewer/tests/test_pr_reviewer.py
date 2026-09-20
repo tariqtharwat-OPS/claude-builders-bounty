@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "generate_review.py"
 spec = importlib.util.spec_from_file_location("generate_review", SCRIPT)
@@ -63,7 +64,8 @@ def test_confidence_is_semantic_not_a_schema_decoration():
     # A mutation that unconditionally returns High must fail these gates.
     cases = [
         (patch_for(("tests/test_a.py",), added=("one", "two")), metadata(additions=2, deletions=0, changedFiles=1)),
-        (patch_for(("src/a.py", "tests/test_a.py"), added=tuple(f"line{i}" for i in range(12))),
+        (patch_for(("src/a.py", "tests/test_a.py"),
+                   added=tuple(f"assert line{i}" for i in range(12))),
          metadata(additions=24, deletions=0, changedFiles=2)),
         (patch_for(("generated/app.js", "tests/test_a.py"), added=tuple(f"line{i}" for i in range(12))),
          metadata(additions=24, deletions=0, changedFiles=2)),
@@ -147,6 +149,54 @@ def test_action_does_not_interpolate_or_allow_output_path_escape():
     assert 'output_file must be a non-empty path inside the workspace' in action
 
 
+def test_binary_marker_cannot_be_followed_by_textual_hunks():
+    patch = ("diff --git a/app.py b/app.py\n"
+             "Binary files a/app.py and b/app.py differ\n"
+             "@@ -1,1 +1,1 @@\n-old\n+new\n")
+    analysis, output = report(metadata(), patch)
+    assert analysis["malformed"] is True
+    assert analysis["reviewable"] is False
+    assert "unsafe input" in output
+
+
+def test_duplicate_headers_and_traversal_paths_are_not_reviewable():
+    duplicate = ("diff --git a/app.py b/app.py\n--- a/app.py\n--- a/app.py\n"
+                 "+++ b/app.py\n@@ -1,1 +1,2 @@\n-old\n+new\n+more\n")
+    traversal = ("diff --git a/../x.py b/../x.py\n--- a/../x.py\n+++ b/../x.py\n"
+                 "@@ -0,0 +1,2 @@\n+assert one\n+assert two\n")
+    for patch in (duplicate, traversal):
+        analysis, output = report(metadata(), patch)
+        assert analysis["malformed"] is True
+        assert analysis["reviewable"] is False
+        assert "unsafe input" in output
+
+
+def test_high_confidence_requires_meaningful_test_coverage_evidence():
+    patch = patch_for(("src/app.py", "tests/test_app.py"),
+                      added=("implemented change", "assert result == expected"))
+    analysis, _ = report(metadata(additions=4, deletions=0, changedFiles=2), patch)
+    assert analysis["has_tests"] is True
+    assert analysis["has_test_evidence"] is True
+    assert reviewer.confidence_level(analysis, []) == "Medium"  # too small for High
+
+    large = patch_for(("src/app.py", "tests/test_app.py"),
+                      added=tuple("assert result == expected" for _ in range(12)))
+    analysis, _ = report(metadata(additions=24, deletions=0, changedFiles=2), large)
+    assert reviewer.confidence_level(analysis, []) == "High"
+
+    filename_only = patch_for(("src/app.py", "tests/test_app.py"),
+                              added=tuple(f"line{i}" for i in range(12)))
+    analysis, _ = report(metadata(additions=24, deletions=0, changedFiles=2), filename_only)
+    assert analysis["has_tests"] is True
+    assert analysis["has_test_evidence"] is False
+    assert reviewer.confidence_level(analysis, []) != "High"
+
+
+def test_report_has_one_documentation_section():
+    analysis, output = report(metadata(), patch_for())
+    assert output.count("### 📖 Documentation") == 1
+
+
 def test_binary_generated_and_large_changes_are_explicitly_uncertain():
     patch = ("diff --git a/generated/app.min.js b/generated/app.min.js\n"
              "Binary files a/generated/app.min.js and b/generated/app.min.js differ\n")
@@ -156,6 +206,40 @@ def test_binary_generated_and_large_changes_are_explicitly_uncertain():
     analysis, output = report(metadata(additions=360, deletions=0, changedFiles=12), large)
     assert analysis["reviewable"] is True
     assert "Large change surface" in output
+
+
+def test_api_non_string_diff_url_fails_cleanly_without_traceback():
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def read(self):
+            return b"{}"
+
+    def fake_urlopen(request, timeout=20):
+        if request.full_url.endswith("/files?per_page=100"):
+            return Response()
+        return Response()
+
+    with patch.object(reviewer.subprocess, "check_output",
+                      side_effect=subprocess.CalledProcessError(1, "gh")), \
+         patch.object(reviewer, "urlopen", side_effect=[
+             type("JSONResponse", (), {
+                 "__enter__": lambda self: self,
+                 "__exit__": lambda self, *args: False,
+                 "read": lambda self: b'{"title":"x","body":"","diff_url":null}'})(),
+             type("JSONResponse", (), {
+                 "__enter__": lambda self: self,
+                 "__exit__": lambda self, *args: False,
+                 "read": lambda self: b'[]'})(),
+         ]):
+        try:
+            reviewer.fetch_pr("https://github.com/o/r/pull/1")
+        except reviewer.InputError as exc:
+            assert "invalid diff_url" in str(exc)
+        else:
+            raise AssertionError("invalid diff_url must fail")
 
 
 def test_cli_reports_inaccessible_or_malformed_inputs_without_traceback(tmp_path):

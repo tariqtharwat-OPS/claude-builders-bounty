@@ -4,6 +4,8 @@
 The patch is the source of truth for changed paths and line counts. PR metadata is
 optional context and is never allowed to manufacture findings or certainty.
 """
+from __future__ import annotations
+
 import argparse
 import json
 import re
@@ -58,10 +60,14 @@ def fetch_pr(url: str) -> tuple[dict, str]:
                         "files": files, "additions": raw.get("additions"),
                         "deletions": raw.get("deletions"),
                         "changedFiles": raw.get("changed_files")}
-            request = Request(raw["diff_url"], headers={"Accept": "application/vnd.github.v3.diff"})
+            diff_url = raw.get("diff_url") if isinstance(raw, dict) else None
+            if not isinstance(diff_url, str) or not diff_url:
+                raise InputError("GitHub API returned an invalid diff_url")
+            request = Request(diff_url, headers={"Accept": "application/vnd.github.v3.diff"})
             with urlopen(request, timeout=20) as response:
                 return metadata, response.read().decode("utf-8")
-        except (HTTPError, URLError, KeyError, ValueError, json.JSONDecodeError) as exc:
+        except (HTTPError, URLError, KeyError, ValueError, TypeError,
+                AttributeError, UnicodeError, json.JSONDecodeError) as exc:
             raise InputError(f"unable to fetch PR: {exc}") from exc
 
 
@@ -94,6 +100,13 @@ def _is_generated_or_vendor(path: str) -> bool:
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?:.*)$")
 
 
+def _is_safe_patch_path(path: str) -> bool:
+    """Accept only relative, repository-local POSIX paths from a patch."""
+    if not path or path.startswith("/") or "\x00" in path or "\\" in path:
+        return False
+    return ".." not in Path(path).parts
+
+
 def _path_from_header(value: str, prefix: str) -> str | None:
     """Return a conventional ---/+++ path, or None for an invalid header."""
     if value == "/dev/null":
@@ -101,7 +114,7 @@ def _path_from_header(value: str, prefix: str) -> str | None:
     if not value.startswith(prefix):
         return None
     path = value[len(prefix):].split("\t", 1)[0]
-    return path if path else None
+    return path if path and _is_safe_patch_path(path) else None
 
 
 def analyze_diff(diff_text: str) -> dict:
@@ -113,7 +126,7 @@ def analyze_diff(diff_text: str) -> dict:
     """
     result = {"files_changed": [], "file_status": {}, "total_additions": 0,
               "total_deletions": 0, "security_flags": [], "security_notes": [],
-              "has_tests": False, "has_docs": False, "generated_files": [],
+              "has_tests": False, "has_test_evidence": False, "has_docs": False, "generated_files": [],
               "malformed": False, "parse_warnings": [], "reviewable": False,
               "trivial_reason": "", "total_changed_lines": 0}
     current = None
@@ -165,6 +178,9 @@ def analyze_diff(diff_text: str) -> dict:
                              "new_diff": match.group(2) if match else None}
             if not match:
                 warn("an unreadable diff header was found")
+            elif (not _is_safe_patch_path(match.group(1)) or
+                  not _is_safe_patch_path(match.group(2))):
+                warn(f"unsafe traversal path in diff header: {current}")
             elif current not in result["files_changed"]:
                 result["files_changed"].append(current)
                 result["file_status"][current] = "modified"
@@ -180,6 +196,8 @@ def analyze_diff(diff_text: str) -> dict:
             if path is None:
                 warn(f"invalid --- header in {current}")
             else:
+                if current_state["old_header"]:
+                    warn(f"duplicate --- header in {current}")
                 expected = current_state["old_diff"]
                 if path not in (expected, "/dev/null"):
                     warn(f"--- header path does not match diff header in {current}")
@@ -193,6 +211,8 @@ def analyze_diff(diff_text: str) -> dict:
             if path is None:
                 warn(f"invalid +++ header in {current}")
             else:
+                if current_state["new_header"]:
+                    warn(f"duplicate +++ header in {current}")
                 expected = current_state["new_diff"]
                 if path not in (expected, "/dev/null"):
                     warn(f"+++ header path does not match diff header in {current}")
@@ -207,6 +227,8 @@ def analyze_diff(diff_text: str) -> dict:
             result["parse_warnings"].append(f"binary content in {current} was not line-inspected")
             continue
         if raw.startswith("@@"):
+            if current_state["binary"]:
+                warn(f"binary marker followed by textual hunk in {current}")
             finish_hunk()
             match = _HUNK_RE.match(raw)
             if not match:
@@ -243,13 +265,15 @@ def analyze_diff(diff_text: str) -> dict:
         if not current:
             warn("addition has no file path")
             continue
+        added = raw[1:].strip()
         if _is_test(current):
             result["has_tests"] = True
+            if re.search(r"(?:\bassert(?:[A-Z]\w*)?\b|\bdef\s+test_\w+|\b(?:it|test|describe)\s*\(|\b(?:pytest|unittest)\b|\bfunc\s+Test[A-Z]|#\[test\]|\.to(?:Equal|Be|Contain)\s*\()", added):
+                result["has_test_evidence"] = True
         if _is_docs(current):
             result["has_docs"] = True
         if _is_generated_or_vendor(current) and current not in result["generated_files"]:
             result["generated_files"].append(current)
-        added = raw[1:].strip()
         if _is_docs(current):
             if any(re.search(pattern, added) for pattern, _ in secret_patterns):
                 result["security_notes"].append(f"example-like security text in documentation: {current}")
@@ -301,7 +325,8 @@ def _metadata_context(metadata: dict, analysis: dict) -> tuple[str, list[str]]:
 def confidence_level(analysis: dict, uncertainties: list[str]) -> str:
     """Apply semantic gates; High is possible only with complete evidence."""
     if (analysis["security_flags"] or analysis["generated_files"] or
-            uncertainties or not analysis["has_tests"]):
+            uncertainties or not analysis["has_tests"] or
+            not analysis["has_test_evidence"]):
         return "Low" if analysis["security_flags"] or analysis["generated_files"] else "Medium"
     if (analysis["total_additions"] + analysis["total_deletions"] >= 20 and
             len(analysis["files_changed"]) >= 2):
