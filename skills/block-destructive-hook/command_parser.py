@@ -293,8 +293,11 @@ def is_destructive(command: str) -> bool:
         for position, token in enumerate(tokens):
             if token.value in {"exec", "timeout", "nohup", "nice", "xargs"}:
                 payload = tokens[position + 1 :]
+                if token.value in {"exec", "timeout", "nohup", "nice", "xargs"}:
+                    while payload and payload[0].value.startswith("-"):
+                        payload = payload[2:] if len(payload) > 1 and not payload[0].value.startswith("--") else payload[1:]
                 if token.value == "timeout":
-                    while payload and (payload[0].value.startswith("-") or re.fullmatch(r"[0-9]+(?:ms|s|m|h|d)?", payload[0].value)):
+                    while payload and re.fullmatch(r"[0-9]+(?:ms|s|m|h|d)?", payload[0].value):
                         payload = payload[1:]
                 if payload and is_destructive(" ".join(item.value for item in payload)):
                     return True
@@ -316,8 +319,12 @@ def is_destructive(command: str) -> bool:
             for position, token in enumerate(args):
                 if sql_delete_without_where(token.value) or sql_schema_destructive(token.value):
                     return True
-                if token.value in {"-c", "-e", "--command", "--execute"}:
+                if token.value in {"-c", "-e", "--command", "--execute", "-cmd"}:
                     statement = " ".join(item.value for item in args[position + 1 :])
+                    if sql_delete_without_where(statement) or sql_schema_destructive(statement):
+                        return True
+                if token.value.startswith(("--command=", "--execute=", "-cmd=")):
+                    statement = token.value.split("=", 1)[1]
                     if sql_delete_without_where(statement) or sql_schema_destructive(statement):
                         return True
         if name == "dd" and any(t.value.startswith(("if=/dev/zero", "if=/dev/random")) for t in tokens[index + 1 :]):
@@ -337,10 +344,16 @@ def is_destructive(command: str) -> bool:
             if token.value in shell_names and position + 1 < len(tokens):
                 shell_args = tokens[position + 1 :]
                 for shell_position, shell_token in enumerate(shell_args):
-                    if shell_token.value in {"-c", "-ec", "-e", "--command"} and shell_position + 1 < len(shell_args):
-                        if is_destructive(shell_args[shell_position + 1].value):
-                            return True
-                        break
+                    option = shell_token.value
+                    if option.startswith(("-c=", "--command=")):
+                        payload = option.split("=", 1)[1]
+                    elif option in {"-c", "-ec", "-e", "--command"} and shell_position + 1 < len(shell_args):
+                        payload = " ".join(item.value for item in shell_args[shell_position + 1 :])
+                    else:
+                        continue
+                    if payload and is_destructive(payload):
+                        return True
+                    break
         if name == "eval":
             payload = " ".join(token.value for token in tokens[index + 1 :])
             if payload and is_destructive(payload):
@@ -359,7 +372,7 @@ def is_destructive(command: str) -> bool:
     # Pipelines into a shell execute their stdin as code; fail closed. Download
     # pipelines remain covered explicitly as well.
     names = [command_name(tokens)[0] for tokens in tokenize(command)]
-    if re.search(r"\|\s*(?:env\s+)?(?:sh|bash|zsh|dash|ksh)\b", command):
+    if re.search(r"\|\s*(?:env\s+)?/?(?:[\w.-]+/)*(?:sh|bash|zsh|dash|ksh)\b", command):
         return True
     if any(n in {"curl", "wget"} for n in names) and any(n in {"sh", "bash", "zsh"} for n in names):
         return True
