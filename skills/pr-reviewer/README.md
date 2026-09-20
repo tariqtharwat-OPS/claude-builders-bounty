@@ -31,13 +31,20 @@ jobs:
 
 ### As a CLI tool
 
-```bash
-# Fetch PR metadata and diff
-gh pr view 42 --repo owner/repo --json title,body,files,additions,deletions,changedFiles > pr_metadata.json
-gh pr diff 42 --repo owner/repo > pr_diff.patch
+The CLI accepts a real GitHub PR URL, fetches metadata and the diff with `gh` when available or GitHub's unauthenticated API, and writes the review without posting anything:
 
-# Generate review report
-python scripts/generate_review.py --metadata pr_metadata.json --diff pr_diff.patch -o report.md
+```bash
+python skills/pr-reviewer/scripts/generate_review.py \\
+  --pr https://github.com/owner/repo/pull/123 \\
+  --output report.md
+```
+
+Run the command from the repository root (the path above is root-relative). It uses `gh` when available and otherwise reads public PR metadata/diffs through GitHub's unauthenticated API; no token or secret is written to reports. Invalid URLs fail clearly. Empty or one-line/trivial diffs produce an explicit `No review — insufficient input` result rather than a normal review.
+
+For offline/reproducible runs, metadata and diff files are also supported. Capture those inputs from the public PR at a pinned revision and commit only sanitized fixtures; never commit credentials:
+
+```bash
+python skills/pr-reviewer/scripts/generate_review.py --metadata pr_metadata.json --diff pr_diff.patch -o report.md
 ```
 
 ## Example Output
@@ -71,15 +78,22 @@ python scripts/generate_review.py --metadata pr_metadata.json --diff pr_diff.pat
 ## Acceptance Criteria
 
 - [x] Works via GitHub Action (`action.yml`)
-- [x] Works via CLI (`python scripts/generate_review.py`)
-- [x] Structured Markdown output with Summary, Code Quality, Security, Tests, Documentation, Suggestions
-- [x] Tested on 3 real PR scenarios (see `tests/test_pr_reviewer.py`)
+- [x] Works via CLI (`python skills/pr-reviewer/scripts/generate_review.py --pr <URL>`)
+- [x] Structured Markdown output with Summary, Code Quality, Security, Tests, Documentation, Suggestions, and Confidence
+- [x] Executed against 2 real public PR URLs; captured outputs are in `tests/real_outputs/`
 - [x] README with setup instructions
+
+The Python tests import and exercise `generate_review.py` directly, including security detection, confidence gating, and empty/trivial input. The files in `tests/real_outputs/` are checked-in outputs from the real CLI against public PR URLs; regenerate them only from those public inputs and inspect that no secrets are present.
+
+Real-output fixtures:
+
+- `tests/real_outputs/cli-14481.md` ← https://github.com/cli/cli/pull/14481 (empty-diff no-review case)
+- `tests/real_outputs/cli-14478.md` ← https://github.com/cli/cli/pull/14478
 
 ## Files
 
 - `action.yml` — GitHub Action definition
 - `pr-reviewer-skill.md` — Agent skill definition (Claude Code / OpenClaw)
 - `scripts/generate_review.py` — CLI implementation
-- `tests/test_pr_reviewer.py` — Test suite (3 scenarios)
+- `tests/test_pr_reviewer.py` — Test suite
 - `README.md` — This file
