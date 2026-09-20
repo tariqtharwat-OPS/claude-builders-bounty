@@ -1,6 +1,7 @@
 #!/bin/bash
 # Install and register the hook without replacing unrelated Claude settings.
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 DEST="${HOME:?}/.claude/hooks"
 HOOK="$DEST/block-destructive.sh"

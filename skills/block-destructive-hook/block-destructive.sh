@@ -4,13 +4,26 @@
 # and arguments are not mistaken for executable commands.
 set -euo pipefail
 
+export PYTHONDONTWRITEBYTECODE=1
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 PARSER="$SCRIPT_DIR/command_parser.py"
 LOG_FILE="${HOME:?}/.claude/hooks/blocked.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 
 is_destructive() {
-  python3 "$PARSER" "$1"
+  local status
+  if python3 "$PARSER" "$1"; then
+    return 0
+  else
+    status=$?
+  fi
+  # The parser uses 1 for a classified-safe command. Any other failure is an
+  # analysis failure, not evidence of safety, so fail closed.
+  if [ "$status" -eq 1 ]; then
+    return 1
+  fi
+  printf 'Destructive-command classifier failed (status %s); blocking command.\n' "$status" >&2
+  return 0
 }
 
 log_blocked() {

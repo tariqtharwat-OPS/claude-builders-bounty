@@ -52,33 +52,51 @@ than explicitly returning `allow` and bypassing Claude Code permissions.
 
 The classifier tokenizes command boundaries, shell quoting, wrappers, and options;
 it does not search arbitrary text for dangerous substrings. It recursively inspects
-executing shell payloads in `$(...)`, backticks, shell `-c`/`sh -c`, and `eval`,
-while leaving single-quoted documentation and echo/printf examples neutral. It blocks:
+executing shell payloads in `$(...)`, backticks, `<(...)`/`>(...)` process
+substitutions (including nested ones), shell `-c`/`sh -c`, `eval`, `find -exec`,
+and here-strings/heredocs (`<<<`, `<<EOF`) fed to a shell, while leaving
+single-quoted documentation and echo/printf examples neutral. It also decodes
+ANSI-C quoted words (`$'...'`) and expands brace expressions (`{a,b}`,
+`{1..5}`) the same way bash would, before checking targets. It blocks:
 
-- Filesystem destruction: root, normalized parent traversal, glob-root,
+- Filesystem destruction: every `rm -rf`/`rm -fr` invocation (as required by
+  the bounty contract), plus root, normalized parent traversal, glob-root,
   parent/current/home directories, sensitive system subtrees, and `./build`
+  even when only one destructive flag is present — including targets hidden
+  behind `$'...'` escapes or `{...}` brace expansion
 - `DROP TABLE`, `DROP DATABASE`, `TRUNCATE`, and `DELETE FROM` without `WHERE`,
-  including multiline SQL and SQL comments
+  including multiline SQL, SQL comments, and fused short flags
+  (`psql -c"DELETE FROM t"`, `mysql -e"DROP TABLE t"`, `sqlcmd -Q "..."`)
 - `git push --force`, `git push -f`, `git push --force-with-lease` (including
   `git -C repo push ...`), and `git reset --hard`
 - `shutdown` and `halt` as command words, plus the existing download-to-shell
   and disk-wipe patterns
+- Destructive payloads behind `nice`, `xargs`, `timeout`, `nohup`, and `exec`
+  wrappers, including their own attached/fused flags (`nice -n19`, `xargs -n1`)
 
-Ordinary `rm -rf build` remains neutral. Quoted documentation such as
-`echo 'rm -rf /'` and `printf 'git push --force'` remains neutral. Blocked
-attempts are logged to `~/.claude/hooks/blocked.log`; the `project` value comes
-from the request's JSON `cwd`.
+Because the acceptance contract names the `rm -rf` pattern itself,
+`rm -rf build` is denied too. Non-recursive ordinary removal and quoted
+documentation such as `echo 'rm -rf /'` and `printf 'git push --force'`
+remain neutral. If the classifier itself fails, the hook fails closed rather
+than treating an analysis error as permission. Blocked attempts are logged to
+`~/.claude/hooks/blocked.log`; the `project` value comes from the request's JSON
+`cwd`.
 
 ## Testing
 
-Run the protocol-level tests from the repository root:
+Run both test suites from the repository root:
 
 ```bash
 bash tests/test_block_destructive.sh
+bash skills/block-destructive-hook/tests/test_block_destructive.sh
 ```
 
-The test invokes the script with the same JSON-over-stdin protocol Claude Code
-uses and checks denial, neutral safe-command behavior, quoted echo/documentation,
-`git -C` force pushes, force-with-lease, normalized paths, multiline/commented
-SQL, benign halt text, and JSON `cwd` logging. The installer is intentionally
-small and only merges its own hook entry.
+The first is a fast smoke test of the classifier's acceptance-critical paths.
+The second invokes the script with the same JSON-over-stdin protocol Claude
+Code uses and is the full regression suite: denial and neutral safe-command
+behavior, quoted echo/documentation, `git -C` force pushes, force-with-lease,
+normalized paths, multiline/commented SQL, fused SQL client flags, benign
+halt text, attached/fused wrapper flags (`nice`, `xargs`), ANSI-C quoted
+(`$'...'`) targets, brace expansion, here-strings and heredocs, nested process
+substitutions, and JSON `cwd` logging. The installer is intentionally small
+and only merges its own hook entry.

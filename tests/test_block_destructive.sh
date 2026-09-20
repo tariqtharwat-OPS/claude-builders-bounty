@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export PYTHONDONTWRITEBYTECODE=1
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 PARSER="$ROOT/skills/block-destructive-hook/command_parser.py"
 HOOK="$ROOT/skills/block-destructive-hook/block-destructive.sh"
@@ -25,7 +26,7 @@ allowed 'echo "$(printf "%s" documentation)"'
 
 # Existing direct rules and the actual JSON protocol.
 blocked 'rm -rf /'
-allowed 'rm -rf build'
+blocked 'rm -rf build'
 blocked 'git -C repo push --force-with-lease'
 blocked 'sqlite3 db "DELETE FROM users"'
 

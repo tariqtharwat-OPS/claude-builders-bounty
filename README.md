@@ -66,7 +66,13 @@ Run the included protocol and regression checks from the repository root:
 
 ```bash
 bash tests/test_block_destructive.sh
+bash skills/block-destructive-hook/tests/test_block_destructive.sh
 ```
+
+The first script is a fast smoke test of the classifier's acceptance-critical
+paths; the second exercises the full JSON `PreToolUse` protocol against the
+complete regression suite (shell wrappers, substitutions, brace expansion,
+here-strings/heredocs, SQL clients, and more). Both must pass.
 
 The hook is intentionally limited to blocking classified destructive commands;
 safe commands remain neutral so Claude Code's normal permission flow applies.
