@@ -1,0 +1,94 @@
+name: 'PR Reviewer Agent'
+description: 'Review pull requests and produce structured Markdown output with code quality, security, test coverage, and improvement suggestions.'
+inputs:
+  pr_number:
+    description: 'Pull request number to review'
+    required: true
+  github_token:
+    description: 'GitHub token for API access'
+    required: true
+    default: ${{ github.token }}
+  post_as_comment:
+    description: 'Post review as PR comment (true/false)'
+    required: false
+    default: 'true'
+  output_file:
+    description: 'Write review to this file path'
+    required: false
+    default: 'pr-review-report.md'
+
+outputs:
+  report_path:
+    description: 'Path to the generated review report'
+  report_summary:
+    description: 'One-line summary of the review'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests
+
+    - name: Fetch PR diff
+      id: fetch
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        PR_NUMBER=${{ inputs.pr_number }}
+        REPO=${{ github.repository }}
+        
+        echo "Fetching PR #$PR_NUMBER from $REPO..."
+        
+        # Get PR metadata
+        gh pr view $PR_NUMBER --repo $REPO --json title,body,files,additions,deletions,changedFiles > pr_metadata.json
+        
+        # Get PR diff
+        gh pr diff $PR_NUMBER --repo $REPO > pr_diff.patch || true
+        
+        echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+        echo "title=$(cat pr_metadata.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["title"])')" >> $GITHUB_OUTPUT
+
+    - name: Generate review report
+      id: review
+      shell: bash
+      run: |
+        python3 ${{ github.action_path }}/scripts/generate_review.py \
+          --metadata pr_metadata.json \
+          --diff pr_diff.patch \
+          --output ${{ inputs.output_file }}
+        
+        SUMMARY=$(head -20 ${{ inputs.output_file }} | grep -A1 "Overall assessment" | tail -1)
+        echo "report_summary=$SUMMARY" >> $GITHUB_OUTPUT
+        echo "report_path=${{ inputs.output_file }}" >> $GITHUB_OUTPUT
+
+    - name: Post review as PR comment
+      if: inputs.post_as_comment == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        PR_NUMBER=${{ inputs.pr_number }}
+        REPO=${{ github.repository }}
+        REPORT=$(cat ${{ inputs.output_file }})
+        
+        gh pr comment $PR_NUMBER --repo $REPO --body "$REPORT"
+
+    - name: Upload report artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: pr-review-report
+        path: ${{ inputs.output_file }}
