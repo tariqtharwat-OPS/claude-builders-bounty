@@ -11,7 +11,7 @@ inputs:
   post_as_comment:
     description: 'Post review as PR comment (true/false)'
     required: false
-    default: 'true'
+    default: 'false'
   output_file:
     description: 'Write review to this file path'
     required: false
@@ -48,19 +48,14 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github_token }}
       run: |
-        PR_NUMBER=${{ inputs.pr_number }}
-        REPO=${{ github.repository }}
-        
+        set -euo pipefail
+        PR_NUMBER='${{ inputs.pr_number }}'
+        REPO='${{ github.repository }}'
         echo "Fetching PR #$PR_NUMBER from $REPO..."
-        
-        # Get PR metadata
-        gh pr view $PR_NUMBER --repo $REPO --json title,body,files,additions,deletions,changedFiles > pr_metadata.json
-        
-        # Get PR diff
-        gh pr diff $PR_NUMBER --repo $REPO > pr_diff.patch || true
-        
-        echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
-        echo "title=$(cat pr_metadata.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["title"])')" >> $GITHUB_OUTPUT
+        gh pr view "$PR_NUMBER" --repo "$REPO" --json title,body,files,additions,deletions,changedFiles > pr_metadata.json
+        gh pr diff "$PR_NUMBER" --repo "$REPO" > pr_diff.patch
+        echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+        echo "title=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["title"])' < pr_metadata.json)" >> "$GITHUB_OUTPUT"
 
     - name: Generate review report
       id: review

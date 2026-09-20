@@ -18,10 +18,10 @@ Automatically review pull requests and generate comprehensive, structured Markdo
    - **Done when:** you have PR title, description, files changed, and discussion context.
 
 2. **Analyze code changes.**
-   - Categorize changes by type: new features, bug fixes, refactoring, docs, tests.
-   - Identify modified files and line counts.
-   - Check for common anti-patterns: hardcoded secrets, missing error handling, unused imports.
-   - **Done when:** each file change is classified and flagged for issues.
+   - Treat the unified patch as authoritative for paths and added/deleted line counts; metadata is context only.
+   - Categorize paths as code, tests, documentation/examples, generated/vendor, or deletion-heavy changes.
+   - Inspect attributable added non-documentation lines for high-confidence risks such as hardcoded credentials, dynamic execution, and shell injection. Documentation examples are reported as uncertainty/notes, not code findings.
+   - **Done when:** the patch parses completely, every finding has an exact changed path and line excerpt, and uncertainty is explicit.
 
 3. **Assess code quality.**
    - Check naming conventions, function length, complexity.
@@ -48,10 +48,11 @@ Automatically review pull requests and generate comprehensive, structured Markdo
    - **Done when:** documentation completeness assessed.
 
 7. **Generate structured report.**
-   - Output Markdown with sections: Summary, Code Quality, Security, Tests, Documentation, Suggestions.
-   - Include specific line references for issues.
-   - Provide actionable improvement suggestions with code examples.
-   - **Done when:** report is complete, formatted, and ready for PR comment.
+   - Output Markdown with sections: Summary, Code Quality, Security, Tests, Documentation, Suggestions, and Confidence.
+   - Include exact diff evidence, specific changed-path excerpts for findings, and metadata mismatches as uncertainty.
+   - Empty, trivial, malformed, inaccessible, and binary-only input must receive an explicit no-review result, not a generic count summary.
+   - Optionally bind audit artifacts with candidate SHA, worktree, clean state, evidence SHA, and audit SHA; never infer those values.
+   - **Done when:** report is complete, conservative, and ready for review (posting remains opt-in).
 
 ## Example Output
 

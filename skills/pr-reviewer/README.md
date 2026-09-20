@@ -5,9 +5,9 @@ Automatically review pull requests and produce structured Markdown output with c
 ## What it does
 
 1. Fetches PR metadata and diff via GitHub API / `gh` CLI
-2. Analyzes code changes for security patterns, test coverage, documentation updates
-3. Generates a structured Markdown report with sections: Summary, Code Quality, Security, Tests, Documentation, Suggestions
-4. Posts the report as a PR comment (when run as a GitHub Action)
+2. Parses the exact unified patch for security patterns, test coverage, documentation updates, and generated/vendor uncertainty
+3. Generates a structured Markdown report with Summary, Code Quality, Security, Tests, Documentation, Suggestions, and Confidence
+4. Posts the report as a PR comment only when explicitly enabled in the GitHub Action
 
 ## Installation
 
@@ -39,13 +39,15 @@ python skills/pr-reviewer/scripts/generate_review.py \\
   --output report.md
 ```
 
-Run the command from the repository root (the path above is root-relative). It uses `gh` when available and otherwise reads public PR metadata/diffs through GitHub's unauthenticated API; no token or secret is written to reports. Invalid URLs fail clearly. Empty or one-line/trivial diffs produce an explicit `No review — insufficient input` result rather than a normal review.
+Run the command from the repository root (the path above is root-relative). It uses `gh` when available and otherwise reads public PR metadata/diffs through GitHub's unauthenticated API; no token or secret is written to reports. Invalid or inaccessible PRs and malformed local inputs fail cleanly without a traceback. The patch is authoritative for changed files and line counts; missing or mismatched metadata is called out as uncertainty, never silently treated as fact. Empty, one-line/trivial, malformed, and binary-only diffs produce an explicit no-review result rather than a polished normal review.
 
 For offline/reproducible runs, metadata and diff files are also supported. Capture those inputs from the public PR at a pinned revision and commit only sanitized fixtures; never commit credentials:
 
 ```bash
 python skills/pr-reviewer/scripts/generate_review.py --metadata pr_metadata.json --diff pr_diff.patch -o report.md
 ```
+
+For exact-candidate audit artifacts, optionally bind the report to `--candidate-sha`, `--worktree`, `--clean`, `--evidence-for-sha`, and `--audit-for-sha`. These values are recorded as evidence labels; they are not inferred or treated as proof by the reviewer.
 
 ## Example Output
 
@@ -83,7 +85,7 @@ python skills/pr-reviewer/scripts/generate_review.py --metadata pr_metadata.json
 - [x] Executed against 2 real public PR URLs; captured outputs are in `tests/real_outputs/`
 - [x] README with setup instructions
 
-The Python tests import and exercise `generate_review.py` directly, including security detection, confidence gating, and empty/trivial input. The files in `tests/real_outputs/` are checked-in outputs from the real CLI against public PR URLs; regenerate them only from those public inputs and inspect that no secrets are present.
+The Python tests import and exercise `generate_review.py` directly, including patch-grounded counts, partial metadata, deletion-heavy and large changes, docs-only examples, tests-only changes, security findings, malformed/inaccessible input, binary/generated paths, confidence gating, evidence binding, and empty/trivial input. The files in `tests/real_outputs/` are checked-in outputs from the real CLI against public PR URLs; regenerate them only from those public inputs and inspect that no secrets are present.
 
 Real-output fixtures:
 
