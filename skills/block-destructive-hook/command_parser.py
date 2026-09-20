@@ -301,9 +301,14 @@ def is_destructive(command: str) -> bool:
             if name.lower() in {"drop", "truncate"}:
                 return True
         if name in {"psql", "mysql", "sqlite3", "sqlcmd"}:
-            for token in tokens[index + 1 :]:
+            args = tokens[index + 1 :]
+            for position, token in enumerate(args):
                 if sql_delete_without_where(token.value) or sql_schema_destructive(token.value):
                     return True
+                if token.value in {"-c", "-e", "--command", "--execute"}:
+                    statement = " ".join(item.value for item in args[position + 1 :])
+                    if sql_delete_without_where(statement) or sql_schema_destructive(statement):
+                        return True
         if name == "dd" and any(t.value.startswith(("if=/dev/zero", "if=/dev/random")) for t in tokens[index + 1 :]):
             return True
         if name == "mkfs" or name.startswith("mkfs."):
@@ -314,20 +319,37 @@ def is_destructive(command: str) -> bool:
             if any(re.search(r"(?:os\.system|subprocess)", t.value) for t in tokens[index + 1 :]):
                 return True
         # A shell's -c string and eval's arguments are executable shell code,
-        # unlike the same text passed to echo/printf as documentation.
-        if name in {"sh", "bash", "zsh", "dash", "ksh", "shell"}:
-            args = tokens[index + 1 :]
-            for position, token in enumerate(args):
-                if token.value == "-c" and position + 1 < len(args):
-                    if is_destructive(args[position + 1].value):
-                        return True
-                    break
+        # unlike the same text passed to echo/printf as documentation. Scan for
+        # shells after wrappers such as exec, timeout, nohup, nice, and xargs.
+        shell_names = {"sh", "bash", "zsh", "dash", "ksh", "shell"}
+        for position, token in enumerate(tokens[index:], start=index):
+            if token.value in shell_names and position + 1 < len(tokens):
+                shell_args = tokens[position + 1 :]
+                for shell_position, shell_token in enumerate(shell_args):
+                    if shell_token.value == "-c" and shell_position + 1 < len(shell_args):
+                        if is_destructive(shell_args[shell_position + 1].value):
+                            return True
+                        break
         if name == "eval":
             payload = " ".join(token.value for token in tokens[index + 1 :])
             if payload and is_destructive(payload):
                 return True
-    # Pipelines such as curl | sh are still structurally visible as commands.
+        # find executes the command after -exec/-execdir; inspect its payload.
+        if name == "find":
+            for position, token in enumerate(tokens[index + 1 :], start=index + 1):
+                if token.value in {"-exec", "-execdir"}:
+                    payload = []
+                    for item in tokens[position + 1 :]:
+                        if item.value in {";", "+"}:
+                            break
+                        payload.append(item.value)
+                    if payload and is_destructive(" ".join(payload)):
+                        return True
+    # Pipelines into a shell execute their stdin as code; fail closed. Download
+    # pipelines remain covered explicitly as well.
     names = [command_name(tokens)[0] for tokens in tokenize(command)]
+    if re.search(r"\|\s*(?:env\s+)?(?:sh|bash|zsh|dash|ksh)\b", command):
+        return True
     if any(n in {"curl", "wget"} for n in names) and any(n in {"sh", "bash", "zsh"} for n in names):
         return True
     return False
