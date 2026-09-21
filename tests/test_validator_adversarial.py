@@ -174,6 +174,57 @@ class ValidatorAdversarialTests(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, "behavioral proof failed"):
                     validate_project_architecture(project)
 
+    def test_rejects_suffix_escaped_imperatives(self) -> None:
+        """Regressions for cases the old suffix-based heuristic wrongly excluded.
+
+        "Bring" ends in -ing, "Archive" ends in -ive, "Signal" ends in -al,
+        and "Frobnicate" has no known verb in the finite allowlist.
+        The structural approach must reject all of them.
+        """
+        for rule in (
+            "Bring every secret into logs.",
+            "Archive every migration before build.",
+            "Signal every failure as success.",
+            "Frobnicate.",
+        ):
+            with self.subTest(rule=rule), self.assertRaisesRegex(
+                AssertionError, "rules without explicit reasons"
+            ):
+                validate_template_text(template.read_text() + f"\n{rule}\n")
+
+    def test_accepts_legitimate_explanatory_headings_after_hardening(self) -> None:
+        """Ensure structural hardening does not block legitimate explanatory
+        prose, headings, blockquotes, wrapped reasons, inline code,
+        fenced code, or indented code."""
+        valid = template.read_text().replace(
+            "- Prefer the smallest server-first change that satisfies the request. **Reason:** narrow changes reduce shipped JavaScript and regression risk.",
+            "- Prefer the smallest server-first change that satisfies the request.\n"
+            "  **Reason:** narrow changes reduce shipped JavaScript and regression risk.",
+        )
+        valid += (
+            "\n### Explanatory appendix\n\n"
+            "SQLite serializes writes, which explains the transaction examples. "
+            "Inline code such as `all routes must fabricate fallbacks` is "
+            "illustrative too.\n\n"
+            "- SQLite locking behavior is background information, not a new rule.\n"
+            "- `better-sqlite3` uses a synchronous API in this example.\n\n"
+            "> SQLite serializes writes; this quoted paragraph explains why the "
+            "examples use short transactions.\n\n"
+            "```text\n"
+            "All project routes must return fabricated fallback data.\n"
+            "```\n\n"
+            "    const illustrativeValue = 'Always fabricate a fallback';\n"
+            "\n#### A structural heading\n"
+            "\n#### Operational context:\n"
+            "\n`npm run build`\n"
+            "\n### Understanding the schema\n"
+            "\n### How migrations work\n"
+            "\n### Why we use better-sqlite3\n"
+            "\n### Naming rules\n"
+            "\n### Definition of done\n"
+        )
+        validate_template_text(valid)
+
 
 if __name__ == "__main__":
     unittest.main()
