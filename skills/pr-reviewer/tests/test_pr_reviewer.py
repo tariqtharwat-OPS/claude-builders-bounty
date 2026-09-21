@@ -179,6 +179,16 @@ def test_summary_describes_config_and_docs_changes_without_symbols_or_behavior_t
         assert summary.count(". ") >= 1
 
 
+def test_summary_preserves_punctuation_in_changed_evidence():
+    patch = patch_for(("config.py",),
+                      added=('VERSION = "1.2.3"', 'API_URL = "https://api.example.com/v1"'))
+    _, output = report(metadata(additions=2, deletions=0, changedFiles=1), patch)
+    summary = next(line for line in output.splitlines() if line.startswith("- **Change summary:**"))
+    assert '1.2.3' in summary
+    assert 'https://api.example.com/v1' in summary
+    assert '1·2·3' not in summary
+
+
 def test_empty_and_trivial_diffs_are_explicit_no_review():
     for patch in ("", patch_for(("README.md",), added=("new",), deleted=("old",))):
         analysis, output = report(metadata(), patch)

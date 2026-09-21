@@ -712,7 +712,7 @@ def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None =
         file_details = []
         for path in described_files:
             snippets = additions_by_file[path][:2]
-            rendered = "; ".join(f"`{snippet.replace('.', '·')}`" for snippet in snippets)
+            rendered = "; ".join(f"`{snippet}`" for snippet in snippets)
             file_details.append(f"`{path}` adds {rendered}")
         semantic_detail = " and ".join(file_details) + "."
     else:
@@ -724,7 +724,7 @@ def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None =
             file_details = []
             for path in deleted_files:
                 snippets = deleted_by_file[path][:2]
-                rendered = "; ".join(f"`{snippet.replace('.', '·')}`" for snippet in snippets)
+                rendered = "; ".join(f"`{snippet}`" for snippet in snippets)
                 file_details.append(f"`{path}` removes {rendered}")
             semantic_detail = " and ".join(file_details) + "."
         else:
