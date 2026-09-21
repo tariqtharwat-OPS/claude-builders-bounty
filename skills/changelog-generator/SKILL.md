@@ -22,10 +22,9 @@ Generate a clean, readable `CHANGELOG.md` from a Git repository's commit history
    - Extract description after the colon.
    - **Done when:** each commit is classified into a category with its description.
 
-3. **Group by type and sort.**
-   - Group commits under their type header.
+3. **Group by type.**
+   - Group commits under their type header while preserving Git's newest-first log order.
    - Emit the literal contract sections in order: `Added`, `Fixed`, `Changed`, `Removed`.
-   - Within each group, sort by date descending (newest first).
    - **Done when:** commits are organized into categorized sections.
 
 4. **Format the changelog.**
@@ -45,6 +44,6 @@ Generate a clean, readable `CHANGELOG.md` from a Git repository's commit history
 
 ## Notes
 
-- If the repo has no conventional commits, fall back to listing all commits under `### Other Changes`.
+- Non-conventional commits are retained under `### Changed` so every post-tag commit remains visible.
 - Preserve author attribution if requested: include `(Author Name)` after the hash.
 - The Bash user command writes `CHANGELOG.md` deterministically for the current post-tag history.
