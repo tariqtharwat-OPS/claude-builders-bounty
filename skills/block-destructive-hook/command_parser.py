@@ -993,8 +993,21 @@ def sql_delete_without_where(value: str) -> bool:
         i = 0
         quote: str | None = None
         dollar: str | None = None
+        comment: str | None = None
         while i < len(text):
             ch = text[i]
+            if comment == "line":
+                if ch in "\r\n":
+                    comment = None
+                i += 1
+                continue
+            if comment == "block":
+                if text.startswith("*/", i):
+                    comment = None
+                    i += 2
+                else:
+                    i += 1
+                continue
             if dollar:
                 end = text.find(dollar, i)
                 if end < 0:
@@ -1027,6 +1040,14 @@ def sql_delete_without_where(value: str) -> bool:
                     dollar = match.group(0)
                     i += len(dollar)
                     continue
+            if text.startswith("--", i):
+                comment = "line"
+                i += 2
+                continue
+            if text.startswith("/*", i):
+                comment = "block"
+                i += 2
+                continue
             if ch == ";":
                 statements.append(text[start:i])
                 start = i + 1
@@ -1092,7 +1113,7 @@ _SHORT_OPTION_ASSIGNMENT = re.compile(r"(?:^\s*|[;&|\n]\s*)([A-Za-z_][A-Za-z0-9_
 
 def expand_simple_option_assignments(command: str) -> str:
     """Resolve literal rm flags with shell-order assignment semantics."""
-    assignments: dict[str, str] = {}
+    events: list[tuple[int, str, str]] = []
     pattern = re.compile(
         r"(?:^|[;&|\n])\s*([A-Za-z_][A-Za-z0-9_]*)\s*(\+=|=)\s*"
         r"((?:\$'[^']*'|'[^']*'|\"[^\"]*\"|[^\s;&|]+)+)"
@@ -1105,13 +1126,19 @@ def expand_simple_option_assignments(command: str) -> str:
             for a, b, c, d in pieces
         )
         decoded = re.sub(r"\\(.)", r"\1", decoded)
+        previous = next((value for start, old_name, value in reversed(events)
+                         if old_name == name and start <= match.start()), "")
         if operator == "+=":
-            decoded = assignments.get(name, "") + decoded
-        assignments[name] = decoded
-    for name, value in assignments.items():
-        if re.fullmatch(r"-[rRfF]+", value):
-            command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", value, command)
-    return command
+            decoded = previous + decoded
+        events.append((match.end(), name, decoded))
+
+    def replace_use(match: re.Match[str]) -> str:
+        name = match.group(1) or match.group(2)
+        value = next((value for end, old_name, value in reversed(events)
+                      if old_name == name and end <= match.start()), None)
+        return value if value and re.fullmatch(r"-[rRfF]+", value) else match.group(0)
+
+    return re.sub(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})", replace_use, command)
 
 
 def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
@@ -1229,26 +1256,41 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
         if "|" not in part and "<<" not in part:
             continue
         part_heredocs = heredoc_count(part)
-        groups = tokenize(part)
-        if not any(command_name(group)[0] in clients for group in groups):
-            heredoc_index += part_heredocs
-            continue
         payloads: list[str] = []
         last_pipe = part.rfind("|")
         last_segment = part[last_pipe + 1 :]
-        stdin_overridden = bool(re.search(r"(?<![<])<(?![<&])\s*(?:/|[A-Za-z0-9_.~-])", last_segment))
-        if "|" in part and not stdin_overridden and (part_heredocs == 0 or last_pipe > part.rfind("<<")):
+        last_segment_tokens = tokenize(last_segment)
+        last_segment_name = command_name(last_segment_tokens[0])[0] if last_segment_tokens else None
+        stdin_overridden = bool(re.search(r"(?<![<])<(?![<])\s*(?:/|[A-Za-z0-9_.~-]|<)", last_segment))
+        if ("|" in part and last_segment_name in clients and not stdin_overridden
+                and (part_heredocs == 0 or last_pipe > part.rfind("<<"))):
             left_side = part.rsplit("|", 1)[0]
             quoted_payloads = [value for _quote, value in re.findall(r"(['\"])(.*?)\1", left_side, re.S)]
             payloads.extend(quoted_payloads or [left_side])
-        if "<<" in part:
-            last_name = command_name(tokenize(last_segment)[0])[0] if tokenize(last_segment) else None
-            segment_has_heredoc = "<<" in last_segment
-            if last_name in clients and heredoc_index + part_heredocs <= len(heredoc_bodies):
-                # Only the final stdin redirection feeds a command. Earlier
-                # heredocs are superseded by a later redirection.
-                payloads.append(heredoc_bodies[heredoc_index + part_heredocs - 1])
-            heredoc_index += part_heredocs
+        # Each pipeline segment owns its own redirections. Inspect every SQL
+        # client segment, while honoring a later file/process-substitution
+        # stdin redirect that supersedes its heredoc.
+        segments = re.split(r"(?<!\|)\|(?!\|)", part)
+        segment_counts = [heredoc_count(segment) for segment in segments]
+        segment_cursor = heredoc_index
+        for segment_number, segment in enumerate(segments):
+            segment_count = segment_counts[segment_number]
+            groups = tokenize(segment)
+            names = [command_name(group)[0] for group in groups]
+            last_name = next((name for name in reversed(names) if name in clients), None)
+            if last_name in clients and (segment_count or (segment_number > 0 and segment_counts[segment_number - 1])):
+                if segment_count:
+                    last_heredoc = segment.rfind("<<")
+                    after = segment[last_heredoc + 2 :]
+                    body_index = segment_cursor + segment_count - 1
+                else:
+                    after = segment
+                    body_index = segment_cursor - 1
+                redirected = bool(re.search(r"(?<![<])<(?![<])\s*(?:/|[A-Za-z0-9_.~-]|<)", after))
+                if not redirected and body_index < len(heredoc_bodies):
+                    payloads.append(heredoc_bodies[body_index])
+            segment_cursor += segment_count
+        heredoc_index += part_heredocs
         if any(sql_delete_without_where(payload) or sql_schema_destructive(payload) for payload in payloads):
             return True
     return False
