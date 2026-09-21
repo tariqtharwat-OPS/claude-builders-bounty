@@ -2,7 +2,10 @@ import json
 import re
 import shutil
 import sqlite3
+import subprocess
 import tempfile
+import textwrap
+import uuid
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
@@ -24,24 +27,23 @@ REQUIRED_TEMPLATE_CONTRACT = [
 
 LIST_ITEM = re.compile(r"^\s{0,3}(?:[-+*]|\d+[.)])\s+(.*)$")
 FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
-MARKDOWN_ONLY = re.compile(r"^\s{0,3}(?:#{1,6}\s|(?:=+|-+)\s*$)")
+MARKDOWN_ONLY = re.compile(r"^\s{0,3}(?:=+|-+)\s*$")
 
-# A reason is required for instructions, not for arbitrary explanatory prose.
-# Match explicit obligation language and the imperative verbs used by this
-# contract. This remains intentionally narrower than natural-language parsing:
-# false negatives fail the adversarial tests, while ordinary Markdown prose is
-# not forced into a brittle allowlist.
-ENFORCEABLE_PROSE = re.compile(
-    r"(?:"
-    r"\b(?:must|shall|should|never|always|may not|required to)\b"
-    r"|\bdo not\b|\bdon't\b"
-    r"|^(?:before\b[^,]*,\s*)?"
-    r"(?:add|avoid|build|cache|declare|ensure|export|include|keep|let|make|"
-    r"name|pass|prefer|record|report|require|return|run|treat|use|validate|"
-    r"wrap)\b"
-    r")",
+# Explicit obligation language catches rules embedded inside declarative
+# sentences. Subjectless prose is treated as imperative by default, instead of
+# trying to enumerate every English verb (the bypass this validator must stop).
+OBLIGATION_LANGUAGE = re.compile(
+    r"\b(?:must|shall|should|never|always|may not|required to|do not|don't)\b",
     re.IGNORECASE,
 )
+EXPLANATORY_OPENING = re.compile(
+    r"^(?:(?:the|this|that|these|those|a|an|every|each|some|many|most|no)\s+"
+    r"|(?:it|they|we|i|he|she|you)\s+"
+    r"|(?:for example|for instance|because|although|while|when|where|why|how|"
+    r"in this|in the|on this|by contrast|as a result|therefore|however)\b)",
+    re.IGNORECASE,
+)
+EXPLANATORY_LABEL = re.compile(r"^(?:example|examples|note|notes):\s*$", re.IGNORECASE)
 
 
 def markdown_contract_blocks(text: str) -> tuple[list[tuple[int, str]], bool]:
@@ -59,6 +61,9 @@ def markdown_contract_blocks(text: str) -> tuple[list[tuple[int, str]], bool]:
             current_line = 0
 
     for number, line in enumerate(text.splitlines(), 1):
+        # Block quotes are prose, not code. Remove nested quote markers so
+        # formatting cannot hide an instruction.
+        line = re.sub(r"^\s{0,3}(?:>\s*)+", "", line)
         fence = FENCE.match(line)
         if fence:
             marker = fence.group(1)
@@ -72,6 +77,14 @@ def markdown_contract_blocks(text: str) -> tuple[list[tuple[int, str]], bool]:
             continue
         if not line.strip() or MARKDOWN_ONLY.match(line):
             flush()
+            continue
+        heading = re.match(r"^\s{0,3}#{1,6}\s+(.*)$", line)
+        if heading:
+            flush()
+            # Sentence-like headings can carry rules; ordinary section labels
+            # remain Markdown structure.
+            if re.search(r"[.!?]\s*$", heading.group(1)):
+                blocks.append((number, heading.group(1)))
             continue
         # Four-space/tab-indented Markdown is a code example, unless it is a
         # continuation of the list/prose block immediately above it.
@@ -99,11 +112,20 @@ def validate_template_text(text: str) -> None:
 
     rules_without_reasons = []
     blocks, fences_closed = markdown_contract_blocks(text)
+    lines = text.splitlines()
     for number, block in blocks:
         # Inline code is example syntax, just like fenced and indented code.
-        prose = re.sub(r"(`+).*?\1", "", block)
-        if ENFORCEABLE_PROSE.search(prose) and not re.search(
-            r"\bReason\s*:", prose, re.IGNORECASE
+        prose = re.sub(r"(`+).*?\1", "", block).strip()
+        if not prose:
+            continue
+        has_reason = bool(re.search(r"\bReason\s*:", prose, re.IGNORECASE))
+        original_line = re.sub(r"^\s{0,3}(?:>\s*)+", "", lines[number - 1])
+        list_item = bool(LIST_ITEM.match(original_line))
+        explanatory = bool(
+            EXPLANATORY_OPENING.match(prose) or EXPLANATORY_LABEL.fullmatch(prose)
+        )
+        if not has_reason and (
+            list_item or OBLIGATION_LANGUAGE.search(prose) or not explanatory
         ):
             rules_without_reasons.append((number, block))
 
@@ -115,6 +137,113 @@ def validate_template_text(text: str) -> None:
 
 def compact_typescript(source: str) -> str:
     return re.sub(r"\s+", " ", source).strip()
+
+
+def prove_route_behavior(project: Path) -> None:
+    """Execute the checked-in TS route through validation, service, and query."""
+    proof_value = f"db-proof-{uuid.uuid4()}"
+    with tempfile.TemporaryDirectory(prefix="b2-route-proof-") as temp:
+        harness = Path(temp)
+        next_shim = harness / "next-server.mjs"
+        zod_shim = harness / "zod.mjs"
+        sqlite_shim = harness / "better-sqlite3.mjs"
+        loader = harness / "loader.mjs"
+        runner = harness / "runner.mjs"
+
+        next_shim.write_text(
+            "export const NextResponse = { json(body, init = {}) { "
+            "return Response.json(body, init); } };\n"
+        )
+        zod_shim.write_text(textwrap.dedent("""
+            class NumberSchema {
+              constructor() { this.integer = false; this.positiveOnly = false; }
+              int() { this.integer = true; return this; }
+              positive() { this.positiveOnly = true; return this; }
+              parse(value) {
+                const parsed = Number(value);
+                if (!Number.isFinite(parsed)) throw new Error("not a number");
+                if (this.integer && !Number.isInteger(parsed)) throw new Error("not an integer");
+                if (this.positiveOnly && parsed <= 0) throw new Error("not positive");
+                return parsed;
+              }
+            }
+            export const z = {
+              coerce: { number: () => new NumberSchema() },
+              object(shape) {
+                return { safeParse(input) {
+                  try {
+                    const data = {};
+                    for (const [key, schema] of Object.entries(shape)) data[key] = schema.parse(input[key]);
+                    return { success: true, data };
+                  } catch (error) { return { success: false, error }; }
+                } };
+              },
+            };
+        """).strip() + "\n")
+        sqlite_shim.write_text(textwrap.dedent("""
+            import { DatabaseSync } from "node:sqlite";
+            export default class Database {
+              constructor(path) { this.inner = new DatabaseSync(path); }
+              exec(sql) { return this.inner.exec(sql); }
+              prepare(sql) { return this.inner.prepare(sql); }
+              pragma(value) { return this.inner.exec(`PRAGMA ${value}`); }
+            }
+        """).strip() + "\n")
+        loader.write_text(textwrap.dedent(f"""
+            import {{ existsSync }} from "node:fs";
+            import {{ registerHooks }} from "node:module";
+            import {{ pathToFileURL }} from "node:url";
+            const project = {json.dumps(str(project))};
+            const shims = {{
+              "next/server": {json.dumps(next_shim.as_uri())},
+              "zod": {json.dumps(zod_shim.as_uri())},
+              "better-sqlite3": {json.dumps(sqlite_shim.as_uri())},
+            }};
+            registerHooks({{
+              resolve(specifier, context, nextResolve) {{
+                if (shims[specifier]) return {{ url: shims[specifier], shortCircuit: true }};
+                if (specifier.startsWith("@/")) {{
+                  const base = `${{project}}/${{specifier.slice(2)}}`;
+                  const target = existsSync(`${{base}}.ts`) ? `${{base}}.ts` : `${{base}}/index.ts`;
+                  return {{ url: pathToFileURL(target).href, shortCircuit: true }};
+                }}
+                return nextResolve(specifier, context);
+              }},
+            }});
+        """).strip() + "\n")
+        runner.write_text(textwrap.dedent(f"""
+            import {{ db }} from {json.dumps((project / "lib/db/index.ts").as_uri())};
+            import {{ GET }} from {json.dumps((project / "app/api/projects/route.ts").as_uri())};
+            db.exec({json.dumps((project / "migrations/0001_initial.sql").read_text())});
+            db.prepare("INSERT INTO users (id, email, created_at) VALUES (?, ?, ?)")
+              .run(731, "proof@example.test", "2026-09-21T00:00:00Z");
+            db.prepare("INSERT INTO projects (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)")
+              .run(947, 731, {json.dumps(proof_value)}, "2026-09-21T00:00:01Z");
+
+            const valid = await GET(new Request("https://example.test/api/projects?ownerId=731"));
+            const validBody = await valid.json();
+            if (valid.status !== 200 || JSON.stringify(validBody) !== JSON.stringify({{
+              projects: [{{ id: 947, ownerId: 731, name: {json.dumps(proof_value)}, createdAt: "2026-09-21T00:00:01Z" }}],
+            }})) throw new Error(`valid route result was not database-backed: ${{valid.status}} ${{JSON.stringify(validBody)}}`);
+
+            const absent = await GET(new Request("https://example.test/api/projects?ownerId=732"));
+            if (absent.status !== 200 || JSON.stringify(await absent.json()) !== JSON.stringify({{ projects: [] }}))
+              throw new Error("owner filter did not reach the query");
+
+            const invalid = await GET(new Request("https://example.test/api/projects?ownerId=not-an-id"));
+            if (invalid.status !== 400 || JSON.stringify(await invalid.json()) !== JSON.stringify({{ error: "invalid_request" }}))
+              throw new Error("validation did not control the route response");
+        """).strip() + "\n")
+        result = subprocess.run(
+            ["node", "--experimental-strip-types", "--import", str(loader), str(runner)],
+            text=True,
+            capture_output=True,
+            timeout=20,
+        )
+        assert result.returncode == 0, (
+            "route -> validation -> service -> query behavioral proof failed:\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
 
 
 def validate_project_architecture(project: Path) -> None:
@@ -170,6 +299,11 @@ def validate_project_architecture(project: Path) -> None:
     assert "ON DELETE CASCADE" in migration
     assert "idx_projects_owner_id" in migration
     assert "NO_CLARIFICATION_NEEDED" in context_check
+
+    # Execute the actual TypeScript modules with narrowly scoped dependency
+    # shims. Random database content prevents hard-coded route/query results
+    # from satisfying the proof.
+    prove_route_behavior(project)
 
     # Apply the checked-in migration to an actual empty SQLite database and
     # exercise its foreign-key policy and indexed query shape.
