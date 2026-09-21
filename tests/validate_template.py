@@ -74,15 +74,20 @@ _NON_VERB_STARTERS = frozenset({
 # Head nouns that make a heading a conventional section label rather than a
 # subjectless instruction. This is deliberately heading-specific: prose such
 # as "Delete the strategy" must still be treated as a command. Matching the
-# final word captures ordinary noun phrases such as "Migration strategy" and
-# "Database architecture" without teaching the imperative detector that
-# "migration" or "database" can never be verbs.
+# final word plus a recognized topic modifier captures noun phrases such as
+# "Migration strategy" and "Database architecture" without allowing an
+# imperative opener such as "Delete strategy" to masquerade as a label.
 _SECTION_LABEL_HEADS = frozenset({
     "appendix", "architecture", "background", "commands", "concepts",
     "configuration", "considerations", "context", "contract", "conventions",
-    "design", "example", "examples", "guide", "guidelines", "introduction", "migration",
-    "migrations", "notes", "overview", "patterns", "policy", "reference",
-    "rules", "schema", "stack", "strategy", "structure", "summary", "versions",
+    "design", "example", "examples", "guide", "guidelines", "introduction",
+    "migration", "migrations", "notes", "overview", "patterns", "policy",
+    "reference", "rules", "schema", "stack", "strategy", "structure",
+    "summary", "versions",
+})
+_SECTION_LABEL_MODIFIERS = frozenset({
+    "api", "application", "component", "deployment", "development",
+    "migration", "project", "runtime", "security", "server", "testing",
 })
 # Determiners that can serve as command objects (e.g., "every migration").
 _DETERMINERS = frozenset({
@@ -210,6 +215,11 @@ def validate_template_text(text: str) -> None:
             kind == "heading"
             and words
             and words[-1] in _SECTION_LABEL_HEADS
+            and (
+                len(words) == 1
+                or first_word in _NON_VERB_STARTERS
+                or first_word in _SECTION_LABEL_MODIFIERS
+            )
             and not any(word in _DETERMINERS for word in words[1:])
             and not OBLIGATION_LANGUAGE.search(prose)
         )

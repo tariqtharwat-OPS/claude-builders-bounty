@@ -192,10 +192,12 @@ class ValidatorAdversarialTests(unittest.TestCase):
             ):
                 validate_template_text(template.read_text() + f"\n{rule}\n")
 
-    def test_rejects_standalone_imperative_headings(self) -> None:
+    def test_rejects_imperative_headings_and_label_spoofs(self) -> None:
         for rule in (
             "### Frobnicate",
             "### Frobnicate:",
+            "### Delete strategy",
+            "### Frobnicate strategy",
         ):
             with self.subTest(rule=rule), self.assertRaisesRegex(
                 AssertionError, "rules without explicit reasons"
