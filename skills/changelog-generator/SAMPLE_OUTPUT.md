@@ -21,8 +21,7 @@ Generated with the submitted script against `github.com/claude-builders-bounty/c
 
 ### Changed
 
-- Initial commit (
-a80a580)
+- Initial commit (a80a580)
 
 ### Removed
 

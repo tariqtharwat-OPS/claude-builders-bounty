@@ -43,7 +43,9 @@ def get_commits(repo: Path, since_tag: str | None = None) -> tuple[str | None, l
     """Return (range tag, commits) using NUL delimiters so subjects stay intact."""
     boundary = since_tag if since_tag is not None else latest_tag(repo)
     revision = f"{boundary}..HEAD" if boundary else "HEAD"
-    raw = git(repo, "log", "--no-merges", "--format=%h%x00%s%x00", revision)
+    # `-z` removes the record-separating newline that otherwise becomes part
+    # of the next hash when subjects and hashes are parsed as NUL fields.
+    raw = git(repo, "log", "-z", "--no-merges", "--format=%h%x00%s", revision)
     fields = raw.split("\x00") if raw else []
     if fields and fields[-1] == "":
         fields.pop()

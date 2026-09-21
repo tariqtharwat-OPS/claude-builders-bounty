@@ -47,6 +47,7 @@ def test_real_git_path_uses_latest_reachable_tag(tmp_path: Path):
     boundary, rows = get_commits(repo)
     assert boundary == "v1.0.0"
     assert [subject for _, subject in rows] == ["docs: explain behavior", "fix: after release"]
+    assert all("\n" not in short_hash for short_hash, _ in rows)
     assert "before release" not in render([parse_commit(*row) for row in rows])
 
 
@@ -57,10 +58,12 @@ def test_repository_without_tags_uses_full_history(tmp_path: Path):
     run(repo, "git", "config", "user.email", "test@example.com")
     run(repo, "git", "config", "user.name", "Test User")
     commit(repo, "initial import", "one.txt")
+    commit(repo, "fix: second commit", "two.txt")
     boundary, rows = get_commits(repo)
     assert boundary is None
-    assert len(rows) == 1
-    assert parse_commit(*rows[0])["category"] == "Changed"
+    assert len(rows) == 2
+    assert all("\n" not in short_hash for short_hash, _ in rows)
+    assert [parse_commit(*row)["category"] for row in rows] == ["Fixed", "Changed"]
 
 
 def test_bash_user_path_writes_changelog(tmp_path: Path):
