@@ -123,7 +123,7 @@
       "position": [-300, 0]
     },
     {
-      "parameters": {"jsCode": "const rows = $input.all().map(i => i.json); return [{json:{commits: rows.map(x => ({sha:(x.sha||'').slice(0,7),message:(x.commit?.message||'').split('\\n')[0],author:x.commit?.author?.name,date:x.commit?.author?.date}))}}];"},
+      "parameters": {"jsCode": "const rows = $input.all().map(i => i.json).filter(x => x && typeof x.sha === 'string' && x.sha.length > 0 && x.commit && typeof x.commit.message === 'string'); return [{json:{commits: rows.map(x => ({sha:x.sha.slice(0,7),message:x.commit.message.split('\\n')[0],author:x.commit.author?.name,date:x.commit.author?.date}))}}];"},
       "id": "normalize-commits",
       "name": "Normalize Commits",
       "type": "n8n-nodes-base.code",

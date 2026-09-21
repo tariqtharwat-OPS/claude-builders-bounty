@@ -19,6 +19,11 @@ for token in ("GITHUB_OWNER", "GITHUB_REPO", "DESTINATION_WEBHOOK_URL", "LANGUAG
     assert token in raw
 assert "merged_at >= cfg.WEEK_START" in nodes["Normalize Merged PRs"]["parameters"]["jsCode"]
 assert "!x.pull_request" in nodes["Normalize Issues"]["parameters"]["jsCode"]
+commit_code = nodes["Normalize Commits"]["parameters"]["jsCode"]
+assert "typeof x.sha === 'string'" in commit_code
+assert "x.sha.length > 0" in commit_code
+assert "x.commit && typeof x.commit.message === 'string'" in commit_code
+assert "commits: rows.map" in commit_code
 for fetch in ("Fetch Closed Issues", "Fetch Closed Pull Requests", "Fetch Weekly Commits"):
     assert nodes[fetch].get("alwaysOutputData") is True, f"{fetch} can false-succeed on an empty week"
 assert "refusing false success" in nodes["Verify Claude Response"]["parameters"]["jsCode"]

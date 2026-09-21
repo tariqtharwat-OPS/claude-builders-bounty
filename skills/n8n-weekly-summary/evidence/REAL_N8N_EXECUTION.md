@@ -8,10 +8,10 @@
 - Delivery boundary: local deterministic Discord HTTP receiver; no real channel was contacted
 - Observed final node: `Deliver to Discord`
 - n8n execution status: `success`, finished=true, UI execution ID 1
-- Workflow SHA-256: `060b9df3dcba3a6c0a9b7b9dd7f78b521818abdc710499d608228e47059224dd`
-- Full execution JSON SHA-256: `e51c3db0b6c6d4091e04574018f1fa9ce2ec6e6e1ca0f7858471346db061e3f8`
-- Mock request log SHA-256: `596d7b84fcdecdb4dc5413a361a5795085ad0ed6c1c82b1a44d94fa47bd46719`
+- Workflow SHA-256: `7bbee3b6f04f567f3a7052b3828e4637c1850e3f2c64fae74ece14814d0f5eeb`
+- Final empty-week execution readback: `Normalize Commits` produced `commits=[]`; `Prepare Claude Prompt` reported `counts.commits=0`; the real n8n path reached `Generate with Claude` and `Deliver to Discord` successfully using controlled local doubles.
+- Final empty-week execution output SHA-256: `b323be3448718e82c43ee1dbb2b4e9f15436e8d8bc2b0ca205dca68f68a3d75f`
 
-The first adversarial empty-week run exposed a plausible false success: GitHub returned zero items, normalization never ran, and n8n stopped successfully at the merge without calling Claude or delivery. The release candidate sets `alwaysOutputData: true` on all three GitHub requests and regression validation enforces it. Retest reached Claude and delivery; request-log readback observed exactly `/v1/messages` then `/discord`.
+The first adversarial empty-week run exposed two failure modes: without `alwaysOutputData`, n8n could stop before Claude/delivery; with the sentinel enabled, an unfiltered normalizer could fabricate one blank commit. The release candidate both preserves the empty-week path and filters commit rows to valid GitHub commit objects. The final isolated n8n retest proved `commits=[]`, prompt count `0`, Claude invocation, and delivery without fabricated activity.
 
 The screenshot is a headless capture of the real local n8n Executions page after that retest. It contains no API key, webhook secret, or private repository data.
