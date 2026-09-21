@@ -51,6 +51,8 @@ def test_report_is_grounded_in_patch_and_has_required_sections():
     assert "Diff evidence" in output
     for section in ("Summary", "Code Quality", "Security", "Tests", "Documentation", "Suggestions", "Confidence"):
         assert section in output
+    summary = next(line for line in output.splitlines() if line.startswith("- **Change summary:**"))
+    assert summary.count(".") == 2
 
 
 def test_small_clean_change_never_gets_easy_high_confidence():
@@ -166,6 +168,8 @@ def test_empty_and_trivial_diffs_are_explicit_no_review():
         assert "No review" in output
         assert "insufficient input" in output
         assert "No review performed" in output
+        summary = next(line for line in output.splitlines() if line.startswith("- **Change summary:**"))
+        assert summary.count(".") == 2
 
 
 def test_malformed_diff_is_safe_failure_not_a_polished_review():

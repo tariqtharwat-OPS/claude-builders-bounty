@@ -647,6 +647,7 @@ def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None =
             status = "No review — insufficient input"
         lines = ["## PR Review Report", "", "### 📋 Summary", f"- **PR:** {title}",
                  f"- **Review status:** ⏸️ {status} ({reason}).",
+                 "- **Change summary:** The submitted patch does not provide a substantive diff for review. No implementation change can be summarized from the available evidence.",
                  "- **Overall assessment:** No review performed; the patch is not sufficient for a grounded review.",
                  "- **Confidence:** Not applicable (insufficient or unsafe input)", "",
                  "### ✅ Code Quality", "- No review performed.", "", "### 🔒 Security",
@@ -672,8 +673,21 @@ def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None =
     else:
         assessment = "✅ Looks good with minor suggestions"
     confidence = confidence_level(diff_analysis, uncertainties)
+    summary_scope = "test-only" if diff_analysis["has_tests"] and changed == sum(
+        1 for path in diff_analysis["files_changed"] if _is_test(path)
+    ) else "implementation"
+    summary_result = (
+        "The patch includes test coverage for the changed behavior."
+        if diff_analysis["has_tests"]
+        else "The patch does not include test files, so changed behavior needs additional verification."
+    )
+    change_summary = (
+        f"This {summary_scope} patch changes {changed} file(s), with {additions} additions and {deletions} deletions. "
+        f"{summary_result}"
+    )
     lines = ["## PR Review Report", "", "### 📋 Summary", f"- **PR:** {title}",
              f"- **Diff evidence:** {changed} file(s), +{additions}/-{deletions} lines (from the patch).",
+             f"- **Change summary:** {change_summary}",
              f"- **Overall assessment:** {assessment}", f"- **Confidence:** {confidence}", ""]
     if limited:
         limitations = []
