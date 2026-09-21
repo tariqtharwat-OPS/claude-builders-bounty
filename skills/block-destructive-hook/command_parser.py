@@ -961,12 +961,19 @@ def expand_simple_option_assignments(command: str) -> str:
     assignments = {name: flags for name, _quote, flags in _SHORT_OPTION_ASSIGNMENT.findall(command)}
     for name, flags in assignments.items():
         command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", flags, command)
+    for name, body in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)=\$'([^']*)'", command):
+        decoded = _decode_ansi_c(body)
+        if re.fullmatch(r"-[rRfF]+", decoded):
+            command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", decoded, command)
     return command
 
 
 def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
     """Inspect SQL text fed to sqlite3 through stdin rather than argv."""
-    client = re.search(r"(?:^|\|\s*)(sqlite3|psql|mysql|sqlcmd)\b", command)
+    client = re.search(
+        r"(?:^|\|\s*)(?:(?:sudo|command)\s+|env(?:\s+[A-Za-z_][A-Za-z0-9_]*=[^\s]+)*\s+)*(sqlite3|psql|mysql|sqlcmd)\b",
+        command,
+    )
     if not client:
         return False
     left_side = command[: client.start()]
