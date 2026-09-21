@@ -176,7 +176,7 @@ assert_decision "sh -ne -c 'DROP TABLE users'" neutral 'allows no-exec shell che
 assert_decision 'export a=--recursive b=--force; rm $a $b build' deny 'tracks multiple exported assignments'
 assert_decision 'declare a=--recursive b=--force; rm $a $b build' deny 'tracks declare assignments'
 assert_decision 'typeset flag=--force; git push $flag origin main' deny 'tracks typeset assignments'
-assert_decision "name=DROP; printf '%s' '$name' | sqlite3 db" neutral 'does not expand variables inside single quotes'
+assert_decision "name=DROP; printf '%s' '\$name' | sqlite3 db" neutral 'does not expand variables inside single quotes'
 assert_decision "env opts=-rf sh -c \"rm \$opts build\"" deny 'propagates env assignments into child shell payloads'
 assert_decision "sqlite3 -init 'DROP TABLE users' db '.tables'" neutral 'does not treat sqlite init filename as inline SQL'
 assert_decision "psql -c 'SELECT \$\$DROP TABLE users\$\$;'" neutral 'allows dollar-quoted SQL string'
