@@ -961,7 +961,7 @@ def git_force_push(tokens: list[Token], index: int) -> bool:
     return any(t.value in {"-f", "--force", "--force-with-lease"} or t.value.startswith("--force-with-lease=") for t in args[i + 1 :])
 
 
-_SHORT_OPTION_ASSIGNMENT = re.compile(r"(?:^|[;&|\n]\s*)([A-Za-z_][A-Za-z0-9_]*)=(?:\$)?([\"']?)(-[rRfF]+)\2(?=\s*;|\s|$)")
+_SHORT_OPTION_ASSIGNMENT = re.compile(r"(?:^\s*|[;&|\n]\s*)([A-Za-z_][A-Za-z0-9_]*)=(?:\$)?([\"']?)(-[rRfF]+)\2(?=\s*;|\s|$)")
 
 
 def expand_simple_option_assignments(command: str) -> str:
@@ -969,11 +969,11 @@ def expand_simple_option_assignments(command: str) -> str:
     assignments = {name: flags for name, _quote, flags in _SHORT_OPTION_ASSIGNMENT.findall(command)}
     for name, flags in assignments.items():
         command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", flags, command)
-    for name, expression in re.findall(r"(?:^|[;&|\n]\s*)([A-Za-z_][A-Za-z0-9_]*)=(-[rRfF](?:\\[rRfF])+)", command):
+    for name, expression in re.findall(r"(?:^\s*|[;&|\n]\s*)([A-Za-z_][A-Za-z0-9_]*)=(-[rRfF](?:\\[rRfF])+)", command):
         decoded = expression.replace("\\", "")
         command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", decoded, command)
     for name, expression in re.findall(
-        r"(?:^|[;&|\n]\s*)([A-Za-z_][A-Za-z0-9_]*)=((?:(?:\$)?'[^']*'|\"[^\"]*\"|[A-Za-z0-9_\\-])+)",
+        r"(?:^\s*|[;&|\n]\s*)([A-Za-z_][A-Za-z0-9_]*)=((?:(?:\$)?'[^']*'|\"[^\"]*\"|[A-Za-z0-9_\\-])+)",
         command,
     ):
         decoded = re.sub(r"\$?'([^']*)'", lambda match: _decode_ansi_c(match.group(1)), expression)
@@ -988,12 +988,14 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
     """Inspect SQL text fed to sqlite3 through stdin rather than argv."""
     clients = {"sqlite3", "psql", "mysql", "sqlcmd"}
 
-    def shell_semicolon_parts(text: str) -> list[str]:
+    def shell_command_parts(text: str) -> list[str]:
         parts: list[str] = []
         start = 0
         quote: str | None = None
         escaped = False
-        for index, char in enumerate(text):
+        index = 0
+        while index < len(text):
+            char = text[index]
             if escaped:
                 escaped = False
             elif char == "\\" and quote != "'":
@@ -1003,16 +1005,30 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
                     quote = None
             elif char in "'\"":
                 quote = char
-            elif char == ";":
+            elif char == ";" or char == "\n":
                 parts.append(text[start:index])
                 start = index + 1
+            elif char in "&|" and index + 1 < len(text) and text[index + 1] == char:
+                parts.append(text[start:index])
+                start = index + 2
+                index += 1
+            index += 1
         parts.append(text[start:])
         return parts
 
-    for part in shell_semicolon_parts(command):
+    structural_command, _, _ = split_heredocs(command)
+    heredoc_bodies = [match.group("body") for match in re.finditer(
+        r"<<-?\s*(?P<quote>['\"]?)(?P<delimiter>[A-Za-z_][A-Za-z0-9_]*)"
+        r"(?P=quote)[^\n]*\n(?P<body>.*?)^[ \t]*(?P=delimiter)[ \t]*(?=;|\r?$)",
+        command,
+        re.M | re.S,
+    )]
+    heredoc_index = 0
+    for part in shell_command_parts(structural_command):
         if "|" not in part and "<<" not in part:
             continue
         if not any(command_name(group)[0] in clients for group in tokenize(part)):
+            heredoc_index += part.count("<<")
             continue
         payloads: list[str] = []
         if "|" in part:
@@ -1020,8 +1036,10 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
             quoted_payloads = [value for _quote, value in re.findall(r"(['\"])(.*?)\1", left_side, re.S)]
             payloads.extend(quoted_payloads or [left_side])
         if "<<" in part:
-            heredoc_body = part.split("<<", 1)[1]
-            payloads.append(re.sub(r"^[^\r\n]*\r?\n", "", heredoc_body, count=1))
+            for _ in range(part.count("<<")):
+                if heredoc_index < len(heredoc_bodies):
+                    payloads.append(heredoc_bodies[heredoc_index])
+                heredoc_index += 1
         if any(sql_delete_without_where(payload) or sql_schema_destructive(payload) for payload in payloads):
             return True
     return False
