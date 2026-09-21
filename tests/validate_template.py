@@ -22,13 +22,73 @@ REQUIRED_TEMPLATE_CONTRACT = [
     "Definition of done",
 ]
 
-# Prose outside a list is explanatory metadata, not a rule. Keeping this set
-# explicit makes an added prose rule fail closed instead of escaping the rule
-# reason check merely because it was not formatted as a list item.
-ALLOWED_PROSE = {
-    "Every enforceable rule in this file carries an explicit **Reason** so an assistant can apply the intent when the exact example does not fit.",
-    "Example:",
-}
+LIST_ITEM = re.compile(r"^\s{0,3}(?:[-+*]|\d+[.)])\s+(.*)$")
+FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+MARKDOWN_ONLY = re.compile(r"^\s{0,3}(?:#{1,6}\s|(?:=+|-+)\s*$)")
+
+# A reason is required for instructions, not for arbitrary explanatory prose.
+# Match explicit obligation language and the imperative verbs used by this
+# contract. This remains intentionally narrower than natural-language parsing:
+# false negatives fail the adversarial tests, while ordinary Markdown prose is
+# not forced into a brittle allowlist.
+ENFORCEABLE_PROSE = re.compile(
+    r"(?:"
+    r"\b(?:must|shall|should|never|always|may not|required to)\b"
+    r"|\bdo not\b|\bdon't\b"
+    r"|^(?:before\b[^,]*,\s*)?"
+    r"(?:add|avoid|build|cache|declare|ensure|export|include|keep|let|make|"
+    r"name|pass|prefer|record|report|require|return|run|treat|use|validate|"
+    r"wrap)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def markdown_contract_blocks(text: str) -> tuple[list[tuple[int, str]], bool]:
+    """Return prose/list blocks outside Markdown code, plus fence validity."""
+    blocks: list[tuple[int, str]] = []
+    current: list[str] = []
+    current_line = 0
+    fence_marker = ""
+
+    def flush() -> None:
+        nonlocal current, current_line
+        if current:
+            blocks.append((current_line, " ".join(part.strip() for part in current)))
+            current = []
+            current_line = 0
+
+    for number, line in enumerate(text.splitlines(), 1):
+        fence = FENCE.match(line)
+        if fence:
+            marker = fence.group(1)
+            if not fence_marker:
+                flush()
+                fence_marker = marker[0]
+            elif marker[0] == fence_marker:
+                fence_marker = ""
+            continue
+        if fence_marker:
+            continue
+        if not line.strip() or MARKDOWN_ONLY.match(line):
+            flush()
+            continue
+        # Four-space/tab-indented Markdown is a code example, unless it is a
+        # continuation of the list/prose block immediately above it.
+        if (line.startswith("    ") or line.startswith("\t")) and not current:
+            continue
+        item = LIST_ITEM.match(line)
+        if item:
+            flush()
+            current_line = number
+            current = [item.group(1)]
+            continue
+        if not current_line:
+            current_line = number
+        current.append(line)
+
+    flush()
+    return blocks, not fence_marker
 
 
 def validate_template_text(text: str) -> None:
@@ -37,28 +97,19 @@ def validate_template_text(text: str) -> None:
     assert "API routes are cached by default" not in text
     assert "Always close connections" not in text
 
-    in_fence = False
     rules_without_reasons = []
-    unexpected_prose = []
-    for number, line in enumerate(text.splitlines(), 1):
-        if line.startswith("```"):
-            in_fence = not in_fence
-            continue
-        if in_fence or not line or line.startswith("#"):
-            continue
-        if re.match(r"^(?:- |\d+\. )", line):
-            if "Reason:" not in line:
-                rules_without_reasons.append((number, line))
-        elif line not in ALLOWED_PROSE:
-            unexpected_prose.append((number, line))
+    blocks, fences_closed = markdown_contract_blocks(text)
+    for number, block in blocks:
+        # Inline code is example syntax, just like fenced and indented code.
+        prose = re.sub(r"(`+).*?\1", "", block)
+        if ENFORCEABLE_PROSE.search(prose) and not re.search(
+            r"\bReason\s*:", prose, re.IGNORECASE
+        ):
+            rules_without_reasons.append((number, block))
 
-    assert not in_fence, "unclosed Markdown code fence"
+    assert fences_closed, "unclosed Markdown code fence"
     assert not rules_without_reasons, (
         f"rules without explicit reasons: {rules_without_reasons}"
-    )
-    assert not unexpected_prose, (
-        "prose outside the reason-checked rule structure: "
-        f"{unexpected_prose}"
     )
 
 
