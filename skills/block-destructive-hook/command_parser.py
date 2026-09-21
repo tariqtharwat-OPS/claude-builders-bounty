@@ -1047,12 +1047,16 @@ def sql_delete_without_where(value: str) -> bool:
         return False
 
     for raw_statement in split_statements(value):
-        delete = re.search(
-            r"\bdelete\s+from\s+(?:\"[^\"]+\"|`[^`]+`|\[[^\]]+\]|[^\s;]+)",
-            raw_statement, re.I,
-        )
-        if delete and not has_top_level_where(raw_statement[delete.end() :]):
-            return True
+        # Locate DELETE only in the quote/comment-masked view so SQL-looking
+        # text inside SELECT/RETURNING literals cannot become a command.
+        cleaned = sql_code(raw_statement)
+        for candidate in re.finditer(r"\bdelete\s+from\s+", cleaned, re.I):
+            delete = re.match(
+                r"\bdelete\s+from\s+(?:\"[^\"]+\"|`[^`]+`|\[[^\]]+\]|[^\s;]+)",
+                raw_statement[candidate.start():], re.I,
+            )
+            if delete and not has_top_level_where(raw_statement[candidate.start() + delete.end():]):
+                return True
     return False
 
 
