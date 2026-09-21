@@ -200,6 +200,7 @@ def _expand_braces(word: str, counter: list[int]) -> list[str]:
 # last form should consume an extra token, or the wrapper's real payload
 # (e.g. the "rm" in "nice -n19 rm -rf /") is swallowed as a flag value.
 WRAPPER_VALUE_OPTIONS: dict[str, set[str]] = {
+    "time": set(),
     "nice": {"-n", "--adjustment"},
     "timeout": {"-k", "--kill-after", "-s", "--signal"},
     "nohup": set(),
@@ -363,6 +364,35 @@ def here_document_payloads(text: str) -> list[str]:
     return payloads
 
 
+def _read_heredoc_delimiter(text: str, start: int) -> tuple[str, int, bool]:
+    """Read a shell heredoc word, including adjacent quoted word pieces."""
+    i = start
+    value: list[str] = []
+    quoted = False
+    while i < len(text) and text[i] not in " \t\r\n;|&<>":
+        if text[i] == "\\" and i + 1 < len(text):
+            quoted = True
+            value.append(text[i + 1])
+            i += 2
+        elif text[i] in "'\"":
+            quoted = True
+            q = text[i]
+            i += 1
+            while i < len(text) and text[i] != q and text[i] not in "\r\n":
+                if text[i] == "\\" and i + 1 < len(text):
+                    value.append(text[i + 1])
+                    i += 2
+                else:
+                    value.append(text[i])
+                    i += 1
+            if i < len(text) and text[i] == q:
+                i += 1
+        else:
+            value.append(text[i])
+            i += 1
+    return "".join(value), i, quoted
+
+
 def split_heredocs(text: str) -> tuple[str, list[str], list[str]]:
     """Mask heredoc bodies and return executable shell/expansion payloads.
 
@@ -403,24 +433,7 @@ def split_heredocs(text: str) -> tuple[str, list[str], list[str]]:
             j += 1
         while j < len(text) and text[j] in " \t":
             j += 1
-        quoted = j < len(text) and text[j] in "'\""
-        escaped_delimiter = j < len(text) and text[j] == "\\"
-        quoted = quoted or escaped_delimiter
-        q = text[j] if quoted else ""
-        if quoted or escaped_delimiter:
-            j += 1
-        start = j
-        if q:
-            while j < len(text) and text[j] != q and text[j] not in "\r\n":
-                j += 1
-        else:
-            while j < len(text) and text[j] not in " \t\r\n;|&<>":
-                j += 1
-        raw_delim = text[start:j]
-        delim = raw_delim.replace('"', '').replace("'", '')
-        quoted = quoted or escaped_delimiter or raw_delim != delim
-        if q and j < len(text) and text[j] == q:
-            j += 1
+        delim, j, quoted = _read_heredoc_delimiter(text, j)
         line_end = text.find("\n", j)
         if not delim or line_end < 0:
             i = j
@@ -624,7 +637,7 @@ def tokenize(text: str) -> list[list[Token]]:
             flush()
             if commands[-1]:
                 commands.append([])
-        elif ch in "|&":
+        elif ch in "|&()":
             flush()
             if i + 1 < len(text) and text[i + 1] == ch:
                 i += 1
@@ -809,6 +822,9 @@ def command_name(tokens: list[Token]) -> tuple[str | None, int]:
     while i < len(tokens):
         word = tokens[i].value
         base = posixpath.basename(word)
+        if base == "!":
+            i += 1
+            continue
         if _ASSIGNMENT_RE.match(word):
             i += 1
             continue
@@ -885,7 +901,17 @@ def sql_code(value: str, preserve_identifiers: bool = False) -> str:
     out = list(value)
     i = 0
     state: str | None = None
+    dollar_tag: str | None = None
     while i < len(value):
+        if dollar_tag is not None:
+            end = value.find(dollar_tag, i)
+            if end < 0:
+                out[i:] = [" "] * (len(value) - i)
+                break
+            out[i:end + len(dollar_tag)] = [" "] * (end + len(dollar_tag) - i)
+            i = end + len(dollar_tag)
+            dollar_tag = None
+            continue
         if state == "line-comment":
             if value[i] in "\r\n":
                 state = None
@@ -940,6 +966,17 @@ def sql_code(value: str, preserve_identifiers: bool = False) -> str:
             out[i : i + 2] = [" ", " "]
             state = "block-comment"
             i += 2
+        elif value[i] == "$" and (match := re.match(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", value[i:])):
+            dollar_tag = match.group(0)
+            out[i:i + len(dollar_tag)] = [" "] * len(dollar_tag)
+            i += len(dollar_tag)
+        elif value[i] == "[":
+            close = value.find("]", i + 1)
+            if close < 0:
+                out[i:] = [" "] * (len(value) - i)
+                break
+            out[i:close + 1] = [" "] * (close + 1 - i)
+            i = close + 1
         elif value[i] in "'\"`":
             out[i] = " "
             state = value[i]
@@ -950,7 +987,52 @@ def sql_code(value: str, preserve_identifiers: bool = False) -> str:
 
 
 def sql_delete_without_where(value: str) -> bool:
-    cleaned = sql_code(value, preserve_identifiers=True)
+    def split_statements(text: str) -> list[str]:
+        statements: list[str] = []
+        start = 0
+        i = 0
+        quote: str | None = None
+        dollar: str | None = None
+        while i < len(text):
+            ch = text[i]
+            if dollar:
+                end = text.find(dollar, i)
+                if end < 0:
+                    return statements + [text[start:]]
+                i = end + len(dollar)
+                dollar = None
+                continue
+            if quote:
+                if ch == "\\" and quote == "'":
+                    i += 2
+                    continue
+                if ch == quote:
+                    if i + 1 < len(text) and text[i + 1] == quote:
+                        i += 2
+                        continue
+                    quote = None
+                i += 1
+                continue
+            if ch in "'\"`":
+                quote = ch
+                i += 1
+                continue
+            if ch == "[":
+                end = text.find("]", i + 1)
+                i = len(text) if end < 0 else end + 1
+                continue
+            if ch == "$":
+                match = re.match(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", text[i:])
+                if match:
+                    dollar = match.group(0)
+                    i += len(dollar)
+                    continue
+            if ch == ";":
+                statements.append(text[start:i])
+                start = i + 1
+            i += 1
+        statements.append(text[start:])
+        return statements
 
     def has_top_level_where(text: str) -> bool:
         cleaned_tail = sql_code(text)
@@ -964,8 +1046,11 @@ def sql_delete_without_where(value: str) -> bool:
                 return True
         return False
 
-    for statement, raw_statement in zip(cleaned.split(";"), value.split(";")):
-        delete = re.search(r"\bdelete\s+from\s+(?:[^\s;]+|\"[^\"]+\"|`[^`]+`)(?:\s|$)", statement, re.I)
+    for raw_statement in split_statements(value):
+        delete = re.search(
+            r"\bdelete\s+from\s+(?:\"[^\"]+\"|`[^`]+`|\[[^\]]+\]|[^\s;]+)",
+            raw_statement, re.I,
+        )
         if delete and not has_top_level_where(raw_statement[delete.end() :]):
             return True
     return False
@@ -1002,22 +1087,26 @@ _SHORT_OPTION_ASSIGNMENT = re.compile(r"(?:^\s*|[;&|\n]\s*)([A-Za-z_][A-Za-z0-9_
 
 
 def expand_simple_option_assignments(command: str) -> str:
-    """Resolve literal rm flags stored in a shell variable."""
-    assignments = {name: flags for name, _quote, flags in _SHORT_OPTION_ASSIGNMENT.findall(command)}
-    for name, flags in assignments.items():
-        command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", flags, command)
-    for name, expression in re.findall(r"(?:^\s*|[;&|\n]\s*)([A-Za-z_][A-Za-z0-9_]*)=(-[rRfF](?:\\[rRfF])+)", command):
-        decoded = expression.replace("\\", "")
-        command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", decoded, command)
-    for name, expression in re.findall(
-        r"(?:^\s*|[;&|\n]\s*)([A-Za-z_][A-Za-z0-9_]*)=((?:(?:\$)?'[^']*'|\"[^\"]*\"|[A-Za-z0-9_\\-])+)",
-        command,
-    ):
-        decoded = re.sub(r"\$?'([^']*)'", lambda match: _decode_ansi_c(match.group(1)), expression)
-        decoded = re.sub(r'\"([^\"]*)\"', r"\1", decoded)
+    """Resolve literal rm flags with shell-order assignment semantics."""
+    assignments: dict[str, str] = {}
+    pattern = re.compile(
+        r"(?:^|[;&|\n])\s*([A-Za-z_][A-Za-z0-9_]*)\s*(\+=|=)\s*"
+        r"((?:\$'[^']*'|'[^']*'|\"[^\"]*\"|[^\s;&|]+)+)"
+    )
+    for match in pattern.finditer(command):
+        name, operator, expression = match.groups()
+        pieces = re.findall(r"\$'([^']*)'|'([^']*)'|\"([^\"]*)\"|([^\s;&|]+)", expression)
+        decoded = "".join(
+            _decode_ansi_c(a) if a else b if b else c if c else d
+            for a, b, c, d in pieces
+        )
         decoded = re.sub(r"\\(.)", r"\1", decoded)
-        if re.fullmatch(r"-[rRfF]+", decoded):
-            command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", decoded, command)
+        if operator == "+=":
+            decoded = assignments.get(name, "") + decoded
+        assignments[name] = decoded
+    for name, value in assignments.items():
+        if re.fullmatch(r"-[rRfF]+", value):
+            command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", value, command)
     return command
 
 
@@ -1049,7 +1138,7 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
                 parts.append(text[start:index])
                 start = index + 2
                 index += 1
-            elif char == "&":
+            elif char == "&" and (index == 0 or text[index - 1] != ">") and (index + 1 >= len(text) or text[index + 1] != ">"):
                 parts.append(text[start:index])
                 start = index + 1
             index += 1
@@ -1080,9 +1169,7 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
         return count
 
     structural_command, _, _ = split_heredocs(command)
-    heredoc_header = re.compile(
-        r"<<-?\s*\\?(?:(?P<quote>['\"])(?P<quoted>[^'\"\r\n]+)(?P=quote)|(?P<bare>[^\s;|&<>]+))"
-    )
+    heredoc_header = re.compile(r"<<-?\s*(?:\\.|'[^'\r\n]*'|\"[^\"\r\n]*\"|[^\s;|&<>])+")
     actual_headers: list[re.Match[str]] = []
     quote: str | None = None
     escaped = False
@@ -1117,7 +1204,14 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
             headers.append(actual_headers[header_index + len(headers)])
         cursor = line_end + 1
         for header in headers:
-            delimiter = header.group("quoted") or header.group("bare")
+            delimiter_start = header.start() + 2
+            if structural_command[delimiter_start:header.end()].lstrip().startswith("-"):
+                delimiter_start += len(structural_command[delimiter_start:header.end()]) - len(
+                    structural_command[delimiter_start:header.end()].lstrip()
+                ) + 1
+            while delimiter_start < header.end() and structural_command[delimiter_start] in " \t":
+                delimiter_start += 1
+            delimiter, _, _ = _read_heredoc_delimiter(structural_command, delimiter_start)
             terminator = re.compile(
                 r"^[ \t]*" + re.escape(delimiter) + r"[ \t]*(?=;|\r?$)", re.M
             ).search(command, cursor)
@@ -1136,13 +1230,14 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
             heredoc_index += part_heredocs
             continue
         payloads: list[str] = []
-        if "|" in part and (part_heredocs == 0 or part.rfind("|") > part.rfind("<<")):
+        last_pipe = part.rfind("|")
+        last_segment = part[last_pipe + 1 :]
+        stdin_overridden = bool(re.search(r"(?<![<])<(?![<&])\s*(?:/|[A-Za-z0-9_.~-])", last_segment))
+        if "|" in part and not stdin_overridden and (part_heredocs == 0 or last_pipe > part.rfind("<<")):
             left_side = part.rsplit("|", 1)[0]
             quoted_payloads = [value for _quote, value in re.findall(r"(['\"])(.*?)\1", left_side, re.S)]
             payloads.extend(quoted_payloads or [left_side])
         if "<<" in part:
-            last_pipe = part.rfind("|")
-            last_segment = part[last_pipe + 1 :]
             last_name = command_name(tokenize(last_segment)[0])[0] if tokenize(last_segment) else None
             segment_has_heredoc = "<<" in last_segment
             if last_name in clients and heredoc_index + part_heredocs <= len(heredoc_bodies):
