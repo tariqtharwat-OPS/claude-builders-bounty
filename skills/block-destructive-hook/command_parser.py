@@ -228,7 +228,29 @@ def sql_client_statements(tokens: list[Token], index: int) -> list[str]:
     # the other supported clients require an explicit execution option for
     # argv SQL. Do not mistake a database filename for executable SQL.
     if client == "sqlite3":
-        statements.extend(t.value for t in args[1:] if not t.value.startswith("."))
+        # Skip sqlite options before locating the database positional. -cmd
+        # and -init execute SQL themselves; other value-taking options merely
+        # configure the client and must not be mistaken for SQL.
+        sqlite_value_options = {"-cmd", "-init", "-separator", "-nullvalue",
+                                "-newline", "-lookaside"}
+        positional: list[str] = []
+        i = 0
+        while i < len(args):
+            value = args[i].value
+            if value == "--":
+                positional.extend(item.value for item in args[i + 1 :])
+                break
+            if value in {"-cmd", "-init"} and i + 1 < len(args):
+                statements.append(args[i + 1].value)
+                i += 2
+            elif value in sqlite_value_options and i + 1 < len(args):
+                i += 2
+            elif value.startswith("-"):
+                i += 1
+            else:
+                positional.append(value)
+                i += 1
+        statements.extend(item for item in positional[1:] if not item.startswith("."))
     for position, token in enumerate(args):
         value = token.value
         if value in SQL_EXACT_VALUE_OPTIONS and position + 1 < len(args):
@@ -809,7 +831,7 @@ _SHELL_RESERVED = {
 
 _PREFIX_VALUE_OPTIONS: dict[str, set[str]] = {
     "sudo": {"-u", "--user", "-g", "--group", "-h", "--host", "-p",
-             "--prompt", "-C", "--chdir", "-D", "-R", "--chroot",
+             "--prompt", "-C", "--chdir", "-D", "-R", "--chroot", "-T",
              "--close-from", "-r", "--role", "-t", "--type"},
     "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
     "command": set(),
@@ -1158,7 +1180,8 @@ def expand_simple_option_assignments(command: str) -> str:
     """Resolve literal rm flags with shell-order assignment semantics."""
     events: list[tuple[int, str, str | None]] = []
     pattern = re.compile(
-        r"(?:^|[;&|\n])\s*([A-Za-z_][A-Za-z0-9_]*)\s*(\+=|=)\s*"
+        r"(?:^|[;&|\n])\s*(?:(?:export|readonly)\s+)*"
+        r"([A-Za-z_][A-Za-z0-9_]*)\s*(\+=|=)\s*"
         r"((?:\$'[^']*'|'[^']*'|\"[^\"]*\"|[^\s;&|]+)*)"
     )
     for match in pattern.finditer(command):
@@ -1190,9 +1213,7 @@ def expand_simple_option_assignments(command: str) -> str:
                       if old_name == name and end <= match.start()), "__UNSET__")
         if value == "":
             return ""
-        if value not in (None, "__UNSET__") and re.fullmatch(
-            r"(?:-[rRfF]+|--(?:recursive|force|force-with-lease)(?:=[^\s;&|]+)?)", value
-        ):
+        if value not in (None, "__UNSET__"):
             return value
         return match.group(0)
 
@@ -1488,6 +1509,17 @@ def is_destructive(command: str, _depth: int = 0) -> bool:
                         payload = shell_args[shell_position + 1].value
                     else:
                         continue
+                    # `bash -n -c` / `sh -n -c` parses without executing the
+                    # command string. Keep substitution analysis active, but
+                    # do not classify the inert -c payload as an execution.
+                    no_exec = any(
+                        item.value == "--noexec"
+                        or (item.value.startswith("-") and not item.value.startswith("--")
+                            and "n" in item.value[1:])
+                        for item in shell_args[:shell_position + 1]
+                    )
+                    if no_exec:
+                        break
                     if payload and is_destructive(payload, _depth + 1):
                         return True
                     break
