@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import html
 import json
 import posixpath
 import re
@@ -130,6 +131,15 @@ def _is_generated_or_vendor(path: str) -> bool:
     lower = path.lower()
     return ("/vendor/" in f"/{lower}" or lower.startswith(("vendor/", "generated/")) or
             "/generated/" in f"/{lower}" or lower.endswith((".min.js", ".min.css")))
+
+
+def _inline_evidence(value: str) -> str:
+    """Render changed text without letting it alter summary structure."""
+    escaped = html.escape(value, quote=False)
+    for character, entity in ((".", "&#46;"), ("!", "&#33;"),
+                              ("?", "&#63;"), ("`", "&#96;")):
+        escaped = escaped.replace(character, entity)
+    return f"<code>{escaped}</code>"
 
 
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?:.*)$")
@@ -712,7 +722,7 @@ def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None =
         file_details = []
         for path in described_files:
             snippets = additions_by_file[path][:2]
-            rendered = "; ".join(f"`{snippet}`" for snippet in snippets)
+            rendered = "; ".join(_inline_evidence(snippet) for snippet in snippets)
             file_details.append(f"`{path}` adds {rendered}")
         semantic_detail = " and ".join(file_details) + "."
     else:
@@ -724,7 +734,7 @@ def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None =
             file_details = []
             for path in deleted_files:
                 snippets = deleted_by_file[path][:2]
-                rendered = "; ".join(f"`{snippet}`" for snippet in snippets)
+                rendered = "; ".join(_inline_evidence(snippet) for snippet in snippets)
                 file_details.append(f"`{path}` removes {rendered}")
             semantic_detail = " and ".join(file_details) + "."
         else:

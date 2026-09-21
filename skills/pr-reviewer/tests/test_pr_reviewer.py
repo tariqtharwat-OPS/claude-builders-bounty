@@ -162,7 +162,7 @@ def test_deletion_heavy_patch_is_reviewable_and_reports_actual_counts():
     assert analysis["reviewable"] is True
     assert "Diff evidence" in output and "+0/-4" in output
     summary = next(line for line in output.splitlines() if line.startswith("- **Change summary:**"))
-    assert "removes" in summary and "`a`" in summary
+    assert "removes" in summary and "<code>a</code>" in summary
     assert summary.count(". ") >= 1
 
 
@@ -184,9 +184,22 @@ def test_summary_preserves_punctuation_in_changed_evidence():
                       added=('VERSION = "1.2.3"', 'API_URL = "https://api.example.com/v1"'))
     _, output = report(metadata(additions=2, deletions=0, changedFiles=1), patch)
     summary = next(line for line in output.splitlines() if line.startswith("- **Change summary:**"))
-    assert '1.2.3' in summary
-    assert 'https://api.example.com/v1' in summary
+    assert '1&#46;2&#46;3' in summary
+    assert 'https://api&#46;example&#46;com/v1' in summary
     assert '1·2·3' not in summary
+
+
+def test_summary_bounds_sentence_count_and_protects_markdown_delimiters():
+    patch = patch_for(("README.md",), added=(
+        "Install dependencies. Configure timeout. Run service. Verify health.",
+        "Example: const cmd = `npm test`;",
+    ))
+    _, output = report(metadata(additions=2, deletions=0, changedFiles=1), patch)
+    summary = next(line for line in output.splitlines() if line.startswith("- **Change summary:**"))
+    assert summary.count(". ") == 1
+    assert "&#46;" in summary
+    assert "&#96;npm test&#96;" in summary
+    assert "<code>" in summary and "</code>" in summary
 
 
 def test_empty_and_trivial_diffs_are_explicit_no_review():
