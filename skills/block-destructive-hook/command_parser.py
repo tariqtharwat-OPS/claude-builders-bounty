@@ -200,7 +200,9 @@ def _expand_braces(word: str, counter: list[int]) -> list[str]:
 # last form should consume an extra token, or the wrapper's real payload
 # (e.g. the "rm" in "nice -n19 rm -rf /") is swallowed as a flag value.
 WRAPPER_VALUE_OPTIONS: dict[str, set[str]] = {
-    "time": set(),
+    # GNU/BSD time options which consume the following argv word. Without
+    # these, `time -o file rm ...` mistakes `file` for the payload command.
+    "time": {"-o", "--output", "-f", "--format"},
     "nice": {"-n", "--adjustment"},
     "timeout": {"-k", "--kill-after", "-s", "--signal"},
     "nohup": set(),
@@ -370,7 +372,14 @@ def _read_heredoc_delimiter(text: str, start: int) -> tuple[str, int, bool]:
     value: list[str] = []
     quoted = False
     while i < len(text) and text[i] not in " \t\r\n;|&<>":
-        if text[i] == "\\" and i + 1 < len(text):
+        if text.startswith("$'", i):
+            quoted = True
+            j = i + 2
+            while j < len(text) and text[j] != "'":
+                j += 2 if text[j] == "\\" and j + 1 < len(text) else 1
+            value.append(_decode_ansi_c(text[i + 2 : j]))
+            i = min(j + 1, len(text))
+        elif text[i] == "\\" and i + 1 < len(text):
             quoted = True
             value.append(text[i + 1])
             i += 2
@@ -787,6 +796,11 @@ def _parenthesized_substitution(text: str, start: int) -> tuple[str | None, int]
 
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
+_SHELL_RESERVED = {
+    "if", "then", "else", "elif", "fi", "for", "while", "until", "do",
+    "done", "case", "esac", "in", "function", "{", "}",
+}
+
 _PREFIX_VALUE_OPTIONS: dict[str, set[str]] = {
     "sudo": {"-u", "--user", "-g", "--group", "-h", "--host", "-p",
              "--prompt", "-C", "--close-from", "-r", "--role", "-t", "--type"},
@@ -825,6 +839,9 @@ def command_name(tokens: list[Token]) -> tuple[str | None, int]:
     while i < len(tokens):
         word = tokens[i].value
         base = posixpath.basename(word)
+        if base in _SHELL_RESERVED:
+            i += 1
+            continue
         if base == "!":
             i += 1
             continue
@@ -899,7 +916,7 @@ def shell_rm_dangerous(tokens: list[Token], index: int) -> bool:
     return False
 
 
-def sql_code(value: str, preserve_identifiers: bool = False) -> str:
+def sql_code(value: str, preserve_identifiers: bool = False, dialect: str | None = None) -> str:
     """Mask SQL comments and quoted literals while preserving code layout."""
     out = list(value)
     i = 0
@@ -961,7 +978,15 @@ def sql_code(value: str, preserve_identifiers: bool = False) -> str:
                 state = None
             i += 1
             continue
-        if value.startswith("--", i):
+        # MySQL executable comments are code, not comments. Preserve their
+        # body so `/*! DROP TABLE ... */` is classified like the server does.
+        if dialect == "mysql" and value.startswith("/*!", i):
+            i += 3
+        elif dialect == "mysql" and value[i] == "#":
+            out[i] = " "
+            state = "line-comment"
+            i += 1
+        elif value.startswith("--", i):
             out[i : i + 2] = [" ", " "]
             state = "line-comment"
             i += 2
@@ -989,7 +1014,7 @@ def sql_code(value: str, preserve_identifiers: bool = False) -> str:
     return "".join(out)
 
 
-def sql_delete_without_where(value: str) -> bool:
+def sql_delete_without_where(value: str, dialect: str | None = None) -> bool:
     def split_statements(text: str) -> list[str]:
         statements: list[str] = []
         start = 0
@@ -1043,6 +1068,13 @@ def sql_delete_without_where(value: str) -> bool:
                     dollar = match.group(0)
                     i += len(dollar)
                     continue
+            if dialect == "mysql" and text.startswith("/*!", i):
+                i += 3
+                continue
+            if dialect == "mysql" and text[i] == "#":
+                comment = "line"
+                i += 1
+                continue
             if text.startswith("--", i):
                 comment = "line"
                 i += 2
@@ -1073,19 +1105,20 @@ def sql_delete_without_where(value: str) -> bool:
     for raw_statement in split_statements(value):
         # Locate DELETE only in the quote/comment-masked view so SQL-looking
         # text inside SELECT/RETURNING literals cannot become a command.
-        cleaned = sql_code(raw_statement)
+        cleaned = sql_code(raw_statement, dialect=dialect)
         for candidate in re.finditer(r"\bdelete\s+from\s+", cleaned, re.I):
             delete = re.match(
                 r"\bdelete\s+from\s+(?:\"[^\"]+\"|`[^`]+`|\[[^\]]+\]|[^\s;]+)",
                 raw_statement[candidate.start():], re.I,
             )
-            if delete and not has_top_level_where(raw_statement[candidate.start() + delete.end():]):
+            if delete and not has_top_level_where(sql_code(
+                    raw_statement[candidate.start() + delete.end():], dialect=dialect)):
                 return True
     return False
 
 
-def sql_schema_destructive(value: str) -> bool:
-    return bool(re.search(r"\b(?:drop\s+(?:table|database)|truncate(?:\s+table)?)\b", sql_code(value), re.I))
+def sql_schema_destructive(value: str, dialect: str | None = None) -> bool:
+    return bool(re.search(r"\b(?:drop\s+(?:table|database)|truncate(?:\s+table)?)\b", sql_code(value, dialect=dialect), re.I))
 
 
 def git_force_push(tokens: list[Token], index: int) -> bool:
@@ -1116,7 +1149,7 @@ _SHORT_OPTION_ASSIGNMENT = re.compile(r"(?:^\s*|[;&|\n]\s*)([A-Za-z_][A-Za-z0-9_
 
 def expand_simple_option_assignments(command: str) -> str:
     """Resolve literal rm flags with shell-order assignment semantics."""
-    events: list[tuple[int, str, str]] = []
+    events: list[tuple[int, str, str | None]] = []
     pattern = re.compile(
         r"(?:^|[;&|\n])\s*([A-Za-z_][A-Za-z0-9_]*)\s*(\+=|=)\s*"
         r"((?:\$'[^']*'|'[^']*'|\"[^\"]*\"|[^\s;&|]+)+)"
@@ -1135,11 +1168,20 @@ def expand_simple_option_assignments(command: str) -> str:
             decoded = previous + decoded
         events.append((match.end(), name, decoded))
 
+    # Shell variables are stateful at the point of use. A later `unset` must
+    # invalidate an earlier literal assignment rather than leaving a stale
+    # value available to the rm classifier.
+    for match in re.finditer(
+        r"(?:^|[;&|\n])\s*unset\s+(?:--)?([A-Za-z_][A-Za-z0-9_]*)", command
+    ):
+        events.append((match.end(), match.group(1), None))
+    events.sort(key=lambda event: event[0])
+
     def replace_use(match: re.Match[str]) -> str:
         name = match.group(1) or match.group(2)
         value = next((value for end, old_name, value in reversed(events)
-                      if old_name == name and end <= match.start()), None)
-        return value if value and re.fullmatch(r"-[rRfF]+", value) else match.group(0)
+                      if old_name == name and end <= match.start()), "__UNSET__")
+        return value if value not in (None, "__UNSET__") and re.fullmatch(r"-[rRfF]+", value) else match.group(0)
 
     return re.sub(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})", replace_use, command)
 
@@ -1281,6 +1323,20 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
             groups = tokenize(segment)
             names = [command_name(group)[0] for group in groups]
             last_name = next((name for name in reversed(names) if name in clients), None)
+            # A SQL client need not be the last pipeline command. Its stdin is
+            # still supplied by the immediately preceding segment in
+            # `producer | sqlite3 | logger`; inspect that producer instead of
+            # tying safety to the terminal pipeline segment.
+            if last_name in clients and segment_number > 0:
+                redirected = bool(re.search(
+                    r"(?<![<])<(?![<])\s*(?:/|[A-Za-z0-9_.~-]|<)", segment
+                ))
+                if not redirected and not segment_counts[segment_number]:
+                    upstream = segments[segment_number - 1]
+                    upstream_quoted = [value for _quote, value in re.findall(
+                        r"(['\"])(.*?)\1", upstream, re.S
+                    )]
+                    payloads.extend(upstream_quoted or [upstream])
             if last_name in clients and (segment_count or (segment_number > 0 and segment_counts[segment_number - 1])):
                 if segment_count:
                     last_heredoc = segment.rfind("<<")
@@ -1294,7 +1350,9 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
                     payloads.append(heredoc_bodies[body_index])
             segment_cursor += segment_count
         heredoc_index += part_heredocs
-        if any(sql_delete_without_where(payload) or sql_schema_destructive(payload) for payload in payloads):
+        if any(sql_delete_without_where(payload, dialect="mysql" if "mysql" in part else None)
+               or sql_schema_destructive(payload, dialect="mysql" if "mysql" in part else None)
+               for payload in payloads):
             return True
     return False
 
@@ -1380,7 +1438,8 @@ def is_destructive(command: str, _depth: int = 0) -> bool:
                 return True
         if name in {"psql", "mysql", "sqlite3", "sqlcmd"}:
             for statement in sql_client_statements(tokens, index):
-                if sql_delete_without_where(statement) or sql_schema_destructive(statement):
+                dialect = "mysql" if name == "mysql" else None
+                if sql_delete_without_where(statement, dialect=dialect) or sql_schema_destructive(statement, dialect=dialect):
                     return True
         if name == "dd" and any(t.value.startswith(("if=/dev/zero", "if=/dev/random")) for t in tokens[index + 1 :]):
             return True
