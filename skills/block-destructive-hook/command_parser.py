@@ -953,12 +953,12 @@ def git_force_push(tokens: list[Token], index: int) -> bool:
     return any(t.value in {"-f", "--force", "--force-with-lease"} or t.value.startswith("--force-with-lease=") for t in args[i + 1 :])
 
 
-_SHORT_OPTION_ASSIGNMENT = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)=(\-[rRfF]+)\b")
+_SHORT_OPTION_ASSIGNMENT = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)=([\"']?)(-[rRfF]+)\2(?=\s*;|\s|$)")
 
 
 def expand_simple_option_assignments(command: str) -> str:
     """Resolve literal rm flags stored in a shell variable."""
-    assignments = {name: flags for name, flags in _SHORT_OPTION_ASSIGNMENT.findall(command)}
+    assignments = {name: flags for name, _quote, flags in _SHORT_OPTION_ASSIGNMENT.findall(command)}
     for name, flags in assignments.items():
         command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", flags, command)
     return command
@@ -966,12 +966,16 @@ def expand_simple_option_assignments(command: str) -> str:
 
 def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
     """Inspect SQL text fed to sqlite3 through stdin rather than argv."""
-    if not re.search(r"(?:\|\s*|\b)sqlite3\b[^\n]*(?:<<|$)", command):
+    client = re.search(r"(?:\|\s*|\b)(sqlite3|psql|mysql|sqlcmd)\b[^\n]*(?:<<|$)", command)
+    if not client:
         return False
-    delete = re.search(r"\bdelete\s+from\s+[^\s;]+(?:\s|$)", command, re.I)
-    if delete and not re.search(r"\bwhere\b", command[delete.start() :], re.I):
-        return True
-    return bool(re.search(r"\b(?:drop\s+(?:table|database)|truncate(?:\s+table)?)\b", command, re.I))
+    left_side = command[: client.start()]
+    quoted_payloads = [value for _quote, value in re.findall(r"(['\"])(.*?)\1", left_side, re.S)]
+    payloads = quoted_payloads or [left_side]
+    if "<<" in client.group(0):
+        heredoc_body = command[client.end() :]
+        payloads.append(re.sub(r"^[A-Za-z_][A-Za-z0-9_-]*\r?\n", "", heredoc_body, count=1))
+    return any(sql_delete_without_where(payload) or sql_schema_destructive(payload) for payload in payloads)
 
 
 # is_destructive recurses into every substitution, wrapper payload, and -c
