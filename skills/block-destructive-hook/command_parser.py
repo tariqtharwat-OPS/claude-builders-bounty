@@ -961,8 +961,12 @@ def expand_simple_option_assignments(command: str) -> str:
     assignments = {name: flags for name, _quote, flags in _SHORT_OPTION_ASSIGNMENT.findall(command)}
     for name, flags in assignments.items():
         command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", flags, command)
-    for name, body in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)=\$'([^']*)'", command):
-        decoded = _decode_ansi_c(body)
+    for name, expression in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)=((?:\$'[^']*'|[A-Za-z0-9_-])+)", command):
+        decoded = re.sub(
+            r"\$'([^']*)'",
+            lambda match: _decode_ansi_c(match.group(1)),
+            expression,
+        )
         if re.fullmatch(r"-[rRfF]+", decoded):
             command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", decoded, command)
     return command
@@ -970,19 +974,18 @@ def expand_simple_option_assignments(command: str) -> str:
 
 def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
     """Inspect SQL text fed to sqlite3 through stdin rather than argv."""
-    client = re.search(
-        r"(?:^|\|\s*)(?:(?:sudo|command)\s+|env(?:\s+[A-Za-z_][A-Za-z0-9_]*=[^\s]+)*\s+)*(sqlite3|psql|mysql|sqlcmd)\b",
-        command,
+    clients = {"sqlite3", "psql", "mysql", "sqlcmd"}
+    client_present = any(
+        posixpath.basename(token.value) in clients
+        for token_group in tokenize(command)
+        for token in token_group
     )
-    if not client:
+    if not client_present or ("|" not in command and "<<" not in command):
         return False
-    left_side = command[: client.start()]
+    left_side = command.rsplit("|", 1)[0] if "|" in command else ""
     quoted_payloads = [value for _quote, value in re.findall(r"(['\"])(.*?)\1", left_side, re.S)]
     payloads = quoted_payloads or [left_side]
-    if "<<" in client.group(0):
-        heredoc_body = command[client.end() :]
-        payloads.append(re.sub(r"^[A-Za-z_][A-Za-z0-9_-]*\r?\n", "", heredoc_body, count=1))
-    elif "<<" in command:
+    if "<<" in command:
         heredoc_body = command.split("<<", 1)[1]
         payloads.append(re.sub(r"^[^\r\n]*\r?\n", "", heredoc_body, count=1))
     return any(sql_delete_without_where(payload) or sql_schema_destructive(payload) for payload in payloads)
