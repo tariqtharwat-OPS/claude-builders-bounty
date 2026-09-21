@@ -961,11 +961,11 @@ def expand_simple_option_assignments(command: str) -> str:
     assignments = {name: flags for name, _quote, flags in _SHORT_OPTION_ASSIGNMENT.findall(command)}
     for name, flags in assignments.items():
         command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", flags, command)
-    for name, expression in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)=(-[rRfF](?:\\[rRfF])+)", command):
+    for name, expression in re.findall(r"(?:^|[;&|]\s*)([A-Za-z_][A-Za-z0-9_]*)=(-[rRfF](?:\\[rRfF])+)", command):
         decoded = expression.replace("\\", "")
         command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", decoded, command)
     for name, expression in re.findall(
-        r"\b([A-Za-z_][A-Za-z0-9_]*)=((?:(?:\$)?'[^']*'|\"[^\"]*\"|[A-Za-z0-9_\\-])+)",
+        r"(?:^|[;&|]\s*)([A-Za-z_][A-Za-z0-9_]*)=((?:(?:\$)?'[^']*'|\"[^\"]*\"|[A-Za-z0-9_\\-])+)",
         command,
     ):
         decoded = re.sub(r"\$?'([^']*)'", lambda match: _decode_ansi_c(match.group(1)), expression)
@@ -982,9 +982,12 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
     wrappers = {"sudo", "env", "command", "nice", "timeout", "nohup", "exec", "xargs"}
     client_present = False
     for token_group in tokenize(command):
+        executable, executable_index = command_name(token_group)
         for index, token in enumerate(token_group):
-            if posixpath.basename(token.value) in clients and (
-                index == 0 or any(posixpath.basename(previous.value) in wrappers for previous in token_group[:index])
+            if (
+                posixpath.basename(token.value) in clients
+                and index == executable_index
+                and (index == 0 or executable in clients or posixpath.basename(token_group[0].value) in wrappers)
             ):
                 client_present = True
                 break
