@@ -52,7 +52,9 @@ def test_report_is_grounded_in_patch_and_has_required_sections():
     for section in ("Summary", "Code Quality", "Security", "Tests", "Documentation", "Suggestions", "Confidence"):
         assert section in output
     summary = next(line for line in output.splitlines() if line.startswith("- **Change summary:**"))
-    assert summary.count(".") == 2
+    assert 2 <= summary.count(". ") <= 3
+    assert "`src/a.py` adds" in summary
+    assert "one" in summary
 
 
 def test_small_clean_change_never_gets_easy_high_confidence():
@@ -474,6 +476,20 @@ def test_empty_and_partial_metadata_are_explicitly_limited():
         assert "Review status:** Limited" in output
         assert "**Confidence:** Low" in output
         assert "Uncertainty" in output
+
+
+def test_non_review_reports_use_the_required_confidence_enum():
+    cases = [
+        "",
+        "diff --git a/image.png b/image.png\nBinary files a/image.png and b/image.png differ\n",
+        "diff --git a/src/a.py b/src/a.py\n@@ malformed\n+one\n",
+    ]
+    for patch in cases:
+        analysis = reviewer.finalize_analysis(reviewer.analyze_diff(patch), patch)
+        output = reviewer.generate_report(metadata(), analysis)
+        confidence = next(line for line in output.splitlines() if "**Confidence:**" in line)
+        assert any(level in confidence for level in ("Low", "Medium", "High"))
+        assert "Not applicable" not in confidence
 
 
 def test_rejected_diff_cli_exits_nonzero_with_a_rejection_report(tmp_path):

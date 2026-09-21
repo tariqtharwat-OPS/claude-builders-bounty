@@ -350,6 +350,7 @@ def analyze_diff(diff_text: str) -> dict:
               "has_test_evidence": False, "has_docs": False,
               "generated_files": [], "malformed": False, "parse_warnings": [],
               "reviewable": False, "input_state": "unclassified",
+              "meaningful_additions": [],
               "trivial_reason": "", "total_changed_lines": 0}
     current = None
     current_state = None
@@ -550,6 +551,8 @@ def analyze_diff(diff_text: str) -> dict:
             warn("addition has no safe file path")
             continue
         added = raw[1:].strip()
+        if added and len(result["meaningful_additions"]) < 12:
+            result["meaningful_additions"].append({"file": current, "line": added[:180]})
         if _is_test(current):
             result["has_tests"] = True
             if re.search(r"(?:\bassert(?:[A-Z]\w*)?\b|\bdef\s+test_\w+|\b(?:it|test|describe)\s*\(|\b(?:pytest|unittest)\b|\bfunc\s+Test[A-Z]|#\[test\]|\.to(?:Equal|Be|Contain)\s*\()", added):
@@ -649,7 +652,7 @@ def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None =
                  f"- **Review status:** ⏸️ {status} ({reason}).",
                  "- **Change summary:** The submitted patch does not provide a substantive diff for review. No implementation change can be summarized from the available evidence.",
                  "- **Overall assessment:** No review performed; the patch is not sufficient for a grounded review.",
-                 "- **Confidence:** Not applicable (insufficient or unsafe input)", "",
+                 "- **Confidence:** Low (insufficient or unsafe input)", "",
                  "### ✅ Code Quality", "- No review performed.", "", "### 🔒 Security",
                  "- No security analysis performed.", "", "### 🧪 Tests", "- No review performed.", "",
                  "### 📖 Documentation", "- No review performed.", "", "### 💡 Suggestions",
@@ -681,9 +684,22 @@ def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None =
         if diff_analysis["has_tests"]
         else "The patch does not include test files, so changed behavior needs additional verification."
     )
+    additions_by_file = {}
+    for item in diff_analysis.get("meaningful_additions", []):
+        additions_by_file.setdefault(item["file"], []).append(item["line"])
+    described_files = list(additions_by_file)[:3]
+    if described_files:
+        file_details = []
+        for path in described_files:
+            snippets = additions_by_file[path][:2]
+            rendered = "; ".join(f"`{snippet.replace('.', '·')}`" for snippet in snippets)
+            file_details.append(f"`{path}` adds {rendered}")
+        semantic_detail = " and ".join(file_details) + "."
+    else:
+        semantic_detail = "The patch contains no attributable non-blank additions to summarize."
     change_summary = (
         f"This {summary_scope} patch changes {changed} file(s), with {additions} additions and {deletions} deletions. "
-        f"{summary_result}"
+        f"Attributable additions show that {semantic_detail} {summary_result}"
     )
     lines = ["## PR Review Report", "", "### 📋 Summary", f"- **PR:** {title}",
              f"- **Diff evidence:** {changed} file(s), +{additions}/-{deletions} lines (from the patch).",
