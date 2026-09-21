@@ -30,14 +30,70 @@ FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
 MARKDOWN_ONLY = re.compile(r"^\s{0,3}(?:=+|-+)\s*$")
 
 # Declarative rules are identified by explicit obligation language. Imperative
-# rules have no grammatical subject, so recognize the command verbs used by a
-# software contract rather than treating every noun-led sentence/list item as
-# a command. Keeping these signals separate prevents Markdown structure from
-# deciding semantics.
+# rules have no grammatical subject, so recognize the command structure
+# (a base-form verb followed by an object) rather than a fixed verb
+# allowlist. Gerunds (-ing), modals, pronouns, articles, question words,
+# and common proper nouns are not command verbs. Keeping these signals
+# separate prevents Markdown structure from deciding semantics.
 OBLIGATION_LANGUAGE = re.compile(
     r"\b(?:must|shall|should|never|always|may not|required to|do not|don't)\b",
     re.IGNORECASE,
 )
+# Structural subjectless-imperative detection: a base-form verb followed
+# by an object word. Catches arbitrary verbs not in any allowlist
+# (e.g., "Obliterate", "Sanitize", "Purge"). The verb must not be a
+# gerund (-ing), a modal, a pronoun, an article, a question word, or a
+# common proper noun that happens to start a sentence as a subject.
+BASE_FORM_VERB_OBJECT = re.compile(
+    r"^(?:(?:before|after|when|while|if|unless)\b[^,]*,\s*)?"
+    r"(?P<verb>[A-Za-z][A-Za-z'-]+)"
+    r"\s+(?P<object>[A-Za-z][A-Za-z'-]+)",
+    re.IGNORECASE,
+)
+# Words that can begin sentences but are not base-form verbs:
+# determiners, pronouns, modals, question words, coordinating
+# conjunctions, common proper nouns used as sentence subjects, and
+# common section-label words that describe topics rather than commands.
+_NON_VERB_STARTERS = frozenset({
+    "a", "an", "the", "all", "every", "each", "some", "any", "no",
+    "this", "that", "these", "those", "i", "me", "my", "myself",
+    "you", "your", "yourself", "yourselves", "he", "him", "his",
+    "himself", "she", "her", "herself", "it", "its", "itself",
+    "we", "us", "our", "ours", "ourselves", "they", "them", "their",
+    "theirs", "themselves", "can", "could", "may", "might", "must",
+    "shall", "should", "will", "would", "what", "why", "how", "when",
+    "where", "who", "which", "both", "few", "many", "most", "other",
+    "another", "several", "either", "neither", "none", "one", "and",
+    "but", "or", "nor", "so", "yet", "for", "sqlite", "code",
+    "inline", "stack", "canonical", "database", "sql", "request",
+    "patterns", "definition", "connection", "versions", "rules",
+})
+# Determiners that can serve as command objects (e.g., "every migration").
+_DETERMINERS = frozenset({
+    "a", "an", "the", "every", "each", "all", "this", "that",
+    "these", "those", "our", "your", "any", "no", "some", "many",
+    "most", "more", "much", "little", "few",
+})
+# Conjunctions and prepositions that are not command objects.
+_CONJUNCTIONS_PREPOSITIONS = frozenset({
+    "and", "or", "but", "nor", "so", "yet", "for", "of", "to",
+    "in", "on", "at", "by", "with", "from", "up", "down", "out",
+    "over", "under", "about", "between", "among", "through",
+    "during", "without", "within", "before", "after", "since",
+    "until", "while", "as", "like", "than", "into", "onto",
+    "upon", "per", "via", "against", "toward", "along", "across",
+    "around", "behind", "beyond", "except", "inside", "outside",
+    "past", "till",
+})
+# Suffixes that indicate a descriptive adjective or non-verb label
+# rather than a command verb when starting a sentence or heading.
+_ADJECTIVE_SUFFIXES = frozenset({
+    "atory", "ory", "al", "ical", "ive", "ble", "ful", "less",
+    "ous", "ial", "atic", "itious", "eous",
+})
+# Known imperative verbs retained for backward-compatible detection
+# of obligation-bearing and canonical contract phrasing that may not
+# have an adjacent object noun matching the structural pattern.
 IMPERATIVE_OPENING = re.compile(
     r"^(?:(?:before|after|when|while|if|unless)\b[^,]*,\s*)?"
     r"(?:add|apply|assert|avoid|build|cache|call|change|choose|create|declare|"
@@ -45,11 +101,6 @@ IMPERATIVE_OPENING = re.compile(
     r"index|inspect|keep|let|make|migrate|name|pass|prefer|preserve|read|record|"
     r"remove|report|require|return|rewrite|run|send|set|stop|store|treat|use|"
     r"validate|verify|wrap|write)\b",
-    re.IGNORECASE,
-)
-COMMAND_WITH_OBJECT = re.compile(
-    r"^(?P<verb>[A-Za-z][A-Za-z'-]*)\s+"
-    r"(?:a|an|all|any|each|every|no|the|this|that|these|those|our|your)\b",
     re.IGNORECASE,
 )
 
@@ -149,12 +200,41 @@ def validate_template_text(text: str) -> None:
         explanatory_heading = kind == "heading" and bool(
             re.match(r"^(?:what|why|how|when|where)\b", prose, re.IGNORECASE)
         )
-        object_command = COMMAND_WITH_OBJECT.match(prose)
+        object_command = BASE_FORM_VERB_OBJECT.match(prose)
         # Gerund-led labels such as "Understanding the schema" are noun
-        # phrases, while a base-form verb followed by an object determiner is
+        # phrases, while a base-form verb followed by an object is
         # command-shaped even when that verb is not in the contract lexicon.
+        # Exclude sentence-starters that are not verbs to avoid treating
+        # subject-verb prose (e.g., "SQLite serializes") as commands.
+        # For headings, require a determiner object to avoid flagging
+        # section labels (e.g., "Explanatory appendix"). For prose,
+        # reject conjunction/preposition objects.
+        verb_lower = object_command.group("verb").lower() if object_command else ""
+        object_word = (
+            object_command.group("object").lower()
+            if object_command
+            else ""
+        )
+        verb_is_adjective = any(
+            verb_lower.endswith(suffix) for suffix in _ADJECTIVE_SUFFIXES
+        )
+        if kind == "heading":
+            # Headings with determiner objects (e.g., "every") are clearly
+            # commands. Headings where the opening word is not an adjective
+            # suffix are also commands even without a determiner (e.g.,
+            # "Obliterate migrations"). Adjective-like heading labels
+            # (e.g., "Explanatory appendix") are not commands.
+            object_is_target = (
+                object_word in _DETERMINERS or not verb_is_adjective
+            )
+        else:
+            object_is_target = object_word not in _CONJUNCTIONS_PREPOSITIONS
         arbitrary_imperative = bool(
-            object_command and not object_command.group("verb").lower().endswith("ing")
+            object_command
+            and verb_lower not in _NON_VERB_STARTERS
+            and not verb_lower.endswith("ing")
+            and not verb_is_adjective
+            and object_is_target
         )
         enforceable = not explanatory_heading and bool(
             OBLIGATION_LANGUAGE.search(prose)

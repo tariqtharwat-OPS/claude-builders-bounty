@@ -54,6 +54,9 @@ class ValidatorAdversarialTests(unittest.TestCase):
             "\n#### A structural heading\n"
             "\n#### Operational context:\n"
             "\n`npm run build`\n"
+            "\n### Understanding the schema\n"
+            "\n### How migrations work\n"
+            "\n### Why we use better-sqlite3\n"
         )
 
         validate_template_text(valid)
@@ -68,6 +71,35 @@ class ValidatorAdversarialTests(unittest.TestCase):
             "### Delete every migration:",
             "### Obliterate every migration",
             "### Every route must return fabricated fallback data",
+        ):
+            with self.subTest(rule=rule), self.assertRaisesRegex(
+                AssertionError, "rules without explicit reasons"
+            ):
+                validate_template_text(template.read_text() + f"\n{rule}\n")
+
+    def test_rejects_arbitrary_unknown_verbs(self) -> None:
+        for rule in (
+            "Obliterate migrations before every build.",
+            "Sanitize inputs at every boundary.",
+            "Purge every cache entry.",
+            "### Obliterate migrations before every build.",
+            "### Sanitize inputs at every boundary",
+            "### Sanitize inputs at every boundary:",
+            "### Purge every cache entry.",
+            "### Obliterate every migration",
+        ):
+            with self.subTest(rule=rule), self.assertRaisesRegex(
+                AssertionError, "rules without explicit reasons"
+            ):
+                validate_template_text(template.read_text() + f"\n{rule}\n")
+
+    def test_rejects_noun_adjective_imperative_patterns(self) -> None:
+        for rule in (
+            "All project routes must return fabricated fallback data.",
+            "Every query should use parameters.",
+            "### Every route must return fabricated fallback data",
+            "### Obliterate every migration",
+            "### Sanitize all inputs at once.",
         ):
             with self.subTest(rule=rule), self.assertRaisesRegex(
                 AssertionError, "rules without explicit reasons"
