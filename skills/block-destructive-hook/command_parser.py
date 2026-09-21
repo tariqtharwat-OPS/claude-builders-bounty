@@ -953,6 +953,27 @@ def git_force_push(tokens: list[Token], index: int) -> bool:
     return any(t.value in {"-f", "--force", "--force-with-lease"} or t.value.startswith("--force-with-lease=") for t in args[i + 1 :])
 
 
+_SHORT_OPTION_ASSIGNMENT = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)=(\-[rRfF]+)\b")
+
+
+def expand_simple_option_assignments(command: str) -> str:
+    """Resolve literal rm flags stored in a shell variable."""
+    assignments = {name: flags for name, flags in _SHORT_OPTION_ASSIGNMENT.findall(command)}
+    for name, flags in assignments.items():
+        command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", flags, command)
+    return command
+
+
+def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
+    """Inspect SQL text fed to sqlite3 through stdin rather than argv."""
+    if not re.search(r"(?:\|\s*|\b)sqlite3\b[^\n]*(?:<<|$)", command):
+        return False
+    delete = re.search(r"\bdelete\s+from\s+[^\s;]+(?:\s|$)", command, re.I)
+    if delete and not re.search(r"\bwhere\b", command[delete.start() :], re.I):
+        return True
+    return bool(re.search(r"\b(?:drop\s+(?:table|database)|truncate(?:\s+table)?)\b", command, re.I))
+
+
 # is_destructive recurses into every substitution, wrapper payload, and -c
 # string it finds. A real command never nests more than a few levels deep;
 # an adversarial one can nest thousands, which previously blew Python's
@@ -966,7 +987,11 @@ def is_destructive(command: str, _depth: int = 0) -> bool:
     if _depth > _MAX_RECURSION_DEPTH:
         return True
 
+    command = expand_simple_option_assignments(command)
     structural_command, heredoc_shell_payloads, heredoc_expansion_payloads = split_heredocs(command)
+
+    if piped_or_heredoc_sql_is_destructive(command):
+        return True
 
     # Command substitutions execute even when embedded in an otherwise benign
     # command. Quoted heredocs suppress expansion; unquoted heredocs do not.
