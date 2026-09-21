@@ -351,6 +351,7 @@ def analyze_diff(diff_text: str) -> dict:
               "generated_files": [], "malformed": False, "parse_warnings": [],
               "reviewable": False, "input_state": "unclassified",
               "meaningful_additions": [],
+              "meaningful_deletions": [],
               "added_symbols": [], "added_test_names": [],
               "behavior_terms": [],
               "trivial_reason": "", "total_changed_lines": 0}
@@ -545,6 +546,10 @@ def analyze_diff(diff_text: str) -> dict:
             hunk["old_seen"] += 1
             if raw[1:].strip():
                 result["total_deletions"] += 1
+                deleted = raw[1:].strip()
+                if current and len(result["meaningful_deletions"]) < 12:
+                    result["meaningful_deletions"].append(
+                        {"file": current, "line": deleted[:180]})
             continue
         # The only remaining valid hunk marker is '+'.
         result["total_additions"] += 1
@@ -711,18 +716,36 @@ def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None =
             file_details.append(f"`{path}` adds {rendered}")
         semantic_detail = " and ".join(file_details) + "."
     else:
-        semantic_detail = "The patch contains no attributable non-blank additions to summarize."
+        deleted_by_file = {}
+        for item in diff_analysis.get("meaningful_deletions", []):
+            deleted_by_file.setdefault(item["file"], []).append(item["line"])
+        deleted_files = list(deleted_by_file)[:3]
+        if deleted_files:
+            file_details = []
+            for path in deleted_files:
+                snippets = deleted_by_file[path][:2]
+                rendered = "; ".join(f"`{snippet.replace('.', '·')}`" for snippet in snippets)
+                file_details.append(f"`{path}` removes {rendered}")
+            semantic_detail = " and ".join(file_details) + "."
+        else:
+            semantic_detail = "The patch contains no attributable non-blank changed lines to summarize."
     symbols = diff_analysis.get("added_symbols", [])[:3]
     test_names = diff_analysis.get("added_test_names", [])[:2]
     if symbols:
         subject = " and ".join(f"`{name}`" for name in symbols)
         first_sentence = f"The patch adds or changes {subject} in the implementation, grounded in the attributable additions."
+    elif described_files:
+        first_sentence = semantic_detail
+    elif diff_analysis.get("meaningful_deletions"):
+        first_sentence = semantic_detail
     else:
         first_sentence = f"The patch updates {', '.join(f'`{path}`' for path in described_files) or 'the reviewed files'} with the attributable additions shown in the diff."
     if test_names:
         second_sentence = "It adds regression coverage for " + "; ".join(f"`{name}`" for name in test_names) + "."
     elif diff_analysis.get("behavior_terms"):
         second_sentence = "The added logic explicitly addresses " + ", ".join(f"`{term}`" for term in diff_analysis["behavior_terms"][:4]) + "."
+    elif diff_analysis.get("meaningful_deletions"):
+        second_sentence = "The patch does not include test files, so the removed behavior needs additional verification." if not diff_analysis["has_tests"] else "The patch includes tests that exercise the changed behavior."
     else:
         second_sentence = summary_result
     change_summary = f"{first_sentence} {second_sentence}"

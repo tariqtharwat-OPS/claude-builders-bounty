@@ -161,6 +161,22 @@ def test_deletion_heavy_patch_is_reviewable_and_reports_actual_counts():
                               patch_for(("old.py",), added=(), deleted=("a", "b", "c", "d")))
     assert analysis["reviewable"] is True
     assert "Diff evidence" in output and "+0/-4" in output
+    summary = next(line for line in output.splitlines() if line.startswith("- **Change summary:**"))
+    assert "removes" in summary and "`a`" in summary
+    assert summary.count(". ") >= 1
+
+
+def test_summary_describes_config_and_docs_changes_without_symbols_or_behavior_terms():
+    for path, lines, marker in (
+        ("config.py", ("retry_count = 3", "timeout_seconds = 20"), "retry_count"),
+        ("README.md", ("Install with the package manager", "Configure the timeout"), "Install"),
+    ):
+        analysis, output = report(metadata(additions=2, deletions=0, changedFiles=1),
+                                  patch_for((path,), added=lines))
+        assert analysis["reviewable"] is True
+        summary = next(line for line in output.splitlines() if line.startswith("- **Change summary:**"))
+        assert marker in summary
+        assert summary.count(". ") >= 1
 
 
 def test_empty_and_trivial_diffs_are_explicit_no_review():
