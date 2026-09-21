@@ -953,7 +953,7 @@ def git_force_push(tokens: list[Token], index: int) -> bool:
     return any(t.value in {"-f", "--force", "--force-with-lease"} or t.value.startswith("--force-with-lease=") for t in args[i + 1 :])
 
 
-_SHORT_OPTION_ASSIGNMENT = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)=([\"']?)(-[rRfF]+)\2(?=\s*;|\s|$)")
+_SHORT_OPTION_ASSIGNMENT = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)=(?:\$)?([\"']?)(-[rRfF]+)\2(?=\s*;|\s|$)")
 
 
 def expand_simple_option_assignments(command: str) -> str:
@@ -966,7 +966,7 @@ def expand_simple_option_assignments(command: str) -> str:
 
 def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
     """Inspect SQL text fed to sqlite3 through stdin rather than argv."""
-    client = re.search(r"(?:\|\s*|\b)(sqlite3|psql|mysql|sqlcmd)\b[^\n]*(?:<<|$)", command)
+    client = re.search(r"(?:^|\|\s*)(sqlite3|psql|mysql|sqlcmd)\b", command)
     if not client:
         return False
     left_side = command[: client.start()]
@@ -975,6 +975,9 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
     if "<<" in client.group(0):
         heredoc_body = command[client.end() :]
         payloads.append(re.sub(r"^[A-Za-z_][A-Za-z0-9_-]*\r?\n", "", heredoc_body, count=1))
+    elif "<<" in command:
+        heredoc_body = command.split("<<", 1)[1]
+        payloads.append(re.sub(r"^[^\r\n]*\r?\n", "", heredoc_body, count=1))
     return any(sql_delete_without_where(payload) or sql_schema_destructive(payload) for payload in payloads)
 
 
