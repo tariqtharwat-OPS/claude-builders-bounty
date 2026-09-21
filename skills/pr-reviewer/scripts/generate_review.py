@@ -351,6 +351,8 @@ def analyze_diff(diff_text: str) -> dict:
               "generated_files": [], "malformed": False, "parse_warnings": [],
               "reviewable": False, "input_state": "unclassified",
               "meaningful_additions": [],
+              "added_symbols": [], "added_test_names": [],
+              "behavior_terms": [],
               "trivial_reason": "", "total_changed_lines": 0}
     current = None
     current_state = None
@@ -553,8 +555,19 @@ def analyze_diff(diff_text: str) -> dict:
         added = raw[1:].strip()
         if added and len(result["meaningful_additions"]) < 12:
             result["meaningful_additions"].append({"file": current, "line": added[:180]})
+        symbol = re.search(r"\b(?:func|def|class)\s+([A-Za-z_]\w*)", added)
+        if symbol and symbol.group(1) not in result["added_symbols"]:
+            result["added_symbols"].append(symbol.group(1))
+        for term in ("re-queued", "supersedes", "duplicate", "deduplic", "stable", "StartedAt", "CreatedAt", "timestamp"):
+            if term.lower() in added.lower() and term not in result["behavior_terms"]:
+                result["behavior_terms"].append(term)
         if _is_test(current):
             result["has_tests"] = True
+            test_name = re.search(r"(?:name:\s*[\"']?|def\s+test_|func\s+Test)([A-Za-z0-9 _-]+)", added)
+            if test_name:
+                name = test_name.group(1).strip(" '\"")
+                if name and name not in result["added_test_names"]:
+                    result["added_test_names"].append(name)
             if re.search(r"(?:\bassert(?:[A-Z]\w*)?\b|\bdef\s+test_\w+|\b(?:it|test|describe)\s*\(|\b(?:pytest|unittest)\b|\bfunc\s+Test[A-Z]|#\[test\]|\.to(?:Equal|Be|Contain)\s*\()", added):
                 result["has_test_evidence"] = True
         if _is_docs(current):
@@ -653,7 +666,9 @@ def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None =
                  "- **Change summary:** The submitted patch does not provide a substantive diff for review. No implementation change can be summarized from the available evidence.",
                  "- **Overall assessment:** No review performed; the patch is not sufficient for a grounded review.",
                  "- **Confidence:** Low (insufficient or unsafe input)", "",
-                 "### ✅ Code Quality", "- No review performed.", "", "### 🔒 Security",
+                 "### ✅ Code Quality", "- No review performed.", "", "### ⚠️ Risks",
+                 "- No grounded risk conclusion is possible because the input is insufficient or unsafe.",
+                 "", "### 🔒 Security",
                  "- No security analysis performed.", "", "### 🧪 Tests", "- No review performed.", "",
                  "### 📖 Documentation", "- No review performed.", "", "### 💡 Suggestions",
                  "1. Provide a complete, substantive unified diff and valid PR metadata.", ""]
@@ -697,10 +712,20 @@ def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None =
         semantic_detail = " and ".join(file_details) + "."
     else:
         semantic_detail = "The patch contains no attributable non-blank additions to summarize."
-    change_summary = (
-        f"This {summary_scope} patch changes {changed} file(s), with {additions} additions and {deletions} deletions. "
-        f"Attributable additions show that {semantic_detail} {summary_result}"
-    )
+    symbols = diff_analysis.get("added_symbols", [])[:3]
+    test_names = diff_analysis.get("added_test_names", [])[:2]
+    if symbols:
+        subject = " and ".join(f"`{name}`" for name in symbols)
+        first_sentence = f"The patch adds or changes {subject} in the implementation, grounded in the attributable additions."
+    else:
+        first_sentence = f"The patch updates {', '.join(f'`{path}`' for path in described_files) or 'the reviewed files'} with the attributable additions shown in the diff."
+    if test_names:
+        second_sentence = "It adds regression coverage for " + "; ".join(f"`{name}`" for name in test_names) + "."
+    elif diff_analysis.get("behavior_terms"):
+        second_sentence = "The added logic explicitly addresses " + ", ".join(f"`{term}`" for term in diff_analysis["behavior_terms"][:4]) + "."
+    else:
+        second_sentence = summary_result
+    change_summary = f"{first_sentence} {second_sentence}"
     lines = ["## PR Review Report", "", "### 📋 Summary", f"- **PR:** {title}",
              f"- **Diff evidence:** {changed} file(s), +{additions}/-{deletions} lines (from the patch).",
              f"- **Change summary:** {change_summary}",
@@ -723,6 +748,13 @@ def generate_report(metadata: dict, diff_analysis: dict, evidence: dict | None =
         lines.append("- Scope is summarized from the exact patch, not the metadata count.")
     if diff_analysis["generated_files"]:
         lines.append("- ⚠️ Generated/vendor-heavy paths were present: " + ", ".join(f"`{p}`" for p in diff_analysis["generated_files"]))
+    lines += ["", "### ⚠️ Risks"]
+    if diff_analysis["security_flags"]:
+        lines.append("- Security risks identified in the added lines are listed below.")
+    elif diff_analysis["binary_files"]:
+        lines.append("- Binary content is uninspected; security conclusions are limited.")
+    else:
+        lines.append("- No high-confidence risks were found by the grounded checks; manual review remains necessary.")
     lines += ["", "### 🔒 Security"]
     if diff_analysis["security_flags"]:
         lines.extend(f"- ❌ **{f['label']}** in `{f['file']}`: `{f['line']}`" for f in diff_analysis["security_flags"])

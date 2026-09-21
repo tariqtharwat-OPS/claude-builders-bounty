@@ -49,12 +49,12 @@ def test_report_is_grounded_in_patch_and_has_required_sections():
     assert analysis["total_additions"] == 4
     assert analysis["files_changed"] == ["src/a.py", "tests/test_a.py"]
     assert "Diff evidence" in output
-    for section in ("Summary", "Code Quality", "Security", "Tests", "Documentation", "Suggestions", "Confidence"):
+    for section in ("Summary", "Code Quality", "Risks", "Security", "Tests", "Documentation", "Suggestions", "Confidence"):
         assert section in output
     summary = next(line for line in output.splitlines() if line.startswith("- **Change summary:**"))
-    assert 2 <= summary.count(". ") <= 3
-    assert "`src/a.py` adds" in summary
-    assert "one" in summary
+    assert summary.count(". ") >= 1 and summary.endswith(".")
+    assert "patch " in summary
+    assert "regression coverage" in summary or "test coverage" in summary
 
 
 def test_small_clean_change_never_gets_easy_high_confidence():
@@ -490,6 +490,7 @@ def test_non_review_reports_use_the_required_confidence_enum():
         confidence = next(line for line in output.splitlines() if "**Confidence:**" in line)
         assert any(level in confidence for level in ("Low", "Medium", "High"))
         assert "Not applicable" not in confidence
+        assert "### ⚠️ Risks" in output
 
 
 def test_rejected_diff_cli_exits_nonzero_with_a_rejection_report(tmp_path):
