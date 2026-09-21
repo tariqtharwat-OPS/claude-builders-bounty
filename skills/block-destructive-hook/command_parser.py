@@ -222,7 +222,13 @@ SQL_EXACT_VALUE_OPTIONS = SQL_SHORT_VALUE_OPTIONS | SQL_LONG_VALUE_OPTIONS | {"-
 def sql_client_statements(tokens: list[Token], index: int) -> list[str]:
     """Return every candidate SQL statement passed to a SQL client invocation."""
     args = tokens[index + 1 :]
-    statements: list[str] = [t.value for t in args]
+    client = posixpath.basename(tokens[index].value).lower()
+    statements: list[str] = []
+    # sqlite3 takes a database filename first, then an optional SQL argument;
+    # the other supported clients require an explicit execution option for
+    # argv SQL. Do not mistake a database filename for executable SQL.
+    if client == "sqlite3":
+        statements.extend(t.value for t in args[1:] if not t.value.startswith("."))
     for position, token in enumerate(args):
         value = token.value
         if value in SQL_EXACT_VALUE_OPTIONS and position + 1 < len(args):
@@ -803,7 +809,8 @@ _SHELL_RESERVED = {
 
 _PREFIX_VALUE_OPTIONS: dict[str, set[str]] = {
     "sudo": {"-u", "--user", "-g", "--group", "-h", "--host", "-p",
-             "--prompt", "-C", "--close-from", "-r", "--role", "-t", "--type"},
+             "--prompt", "-C", "--chdir", "-D", "-R", "--chroot",
+             "--close-from", "-r", "--role", "-t", "--type"},
     "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
     "command": set(),
     "builtin": set(),
@@ -1152,7 +1159,7 @@ def expand_simple_option_assignments(command: str) -> str:
     events: list[tuple[int, str, str | None]] = []
     pattern = re.compile(
         r"(?:^|[;&|\n])\s*([A-Za-z_][A-Za-z0-9_]*)\s*(\+=|=)\s*"
-        r"((?:\$'[^']*'|'[^']*'|\"[^\"]*\"|[^\s;&|]+)+)"
+        r"((?:\$'[^']*'|'[^']*'|\"[^\"]*\"|[^\s;&|]+)*)"
     )
     for match in pattern.finditer(command):
         name, operator, expression = match.groups()
@@ -1172,7 +1179,7 @@ def expand_simple_option_assignments(command: str) -> str:
     # invalidate an earlier literal assignment rather than leaving a stale
     # value available to the rm classifier.
     for match in re.finditer(
-        r"(?:^|[;&|\n])\s*unset\s+(?:--)?([A-Za-z_][A-Za-z0-9_]*)", command
+        r"(?:^|[;&|\n])\s*unset\s+(?:(?:-[fv])\s+)*(?:--)?([A-Za-z_][A-Za-z0-9_]*)", command
     ):
         events.append((match.end(), match.group(1), None))
     events.sort(key=lambda event: event[0])
@@ -1181,7 +1188,13 @@ def expand_simple_option_assignments(command: str) -> str:
         name = match.group(1) or match.group(2)
         value = next((value for end, old_name, value in reversed(events)
                       if old_name == name and end <= match.start()), "__UNSET__")
-        return value if value not in (None, "__UNSET__") and re.fullmatch(r"-[rRfF]+", value) else match.group(0)
+        if value == "":
+            return ""
+        if value not in (None, "__UNSET__") and re.fullmatch(
+            r"(?:-[rRfF]+|--(?:recursive|force|force-with-lease)(?:=[^\s;&|]+)?)", value
+        ):
+            return value
+        return match.group(0)
 
     return re.sub(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})", replace_use, command)
 
@@ -1333,10 +1346,16 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
                 ))
                 if not redirected and not segment_counts[segment_number]:
                     upstream = segments[segment_number - 1]
-                    upstream_quoted = [value for _quote, value in re.findall(
-                        r"(['\"])(.*?)\1", upstream, re.S
-                    )]
-                    payloads.extend(upstream_quoted or [upstream])
+                    # Reconstruct the producer's post-expansion argv words.
+                    # Raw quote-fragment regexes miss shell concatenation such
+                    # as `'DROP ''TABLE users;'` and backslash-escaped spaces.
+                    producer_words = []
+                    for producer_command in tokenize(upstream):
+                        if len(producer_command) > 1:
+                            producer_words.append(" ".join(
+                                token.value for token in producer_command[1:]
+                            ))
+                    payloads.extend(producer_words or [upstream])
             if last_name in clients and (segment_count or (segment_number > 0 and segment_counts[segment_number - 1])):
                 if segment_count:
                     last_heredoc = segment.rfind("<<")
