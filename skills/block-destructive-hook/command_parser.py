@@ -939,7 +939,8 @@ def sql_code(value: str) -> str:
 def sql_delete_without_where(value: str) -> bool:
     cleaned = sql_code(value)
     for statement in cleaned.split(";"):
-        if re.search(r"\bdelete\s+from\s+(?:[^\s;]+|\"[^\"]+\"|`[^`]+`)(?:\s|$)", statement, re.I) and not re.search(r"\bwhere\b", statement, re.I):
+        delete = re.search(r"\bdelete\s+from\s+(?:[^\s;]+|\"[^\"]+\"|`[^`]+`)(?:\s|$)", statement, re.I)
+        if delete and not re.search(r"\bwhere\b", statement[delete.end() :], re.I):
             return True
     return False
 
@@ -1050,7 +1051,7 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
         return count
 
     structural_command, _, _ = split_heredocs(command)
-    heredoc_header = re.compile(r"<<-?\s*\\?(['\"]?)([A-Za-z0-9_-]+)\1")
+    heredoc_header = re.compile(r"<<-?\s*\\?(['\"]?)([^\s;|&<>]+)\1")
     actual_headers: list[re.Match[str]] = []
     quote: str | None = None
     escaped = False
@@ -1086,11 +1087,9 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
         cursor = line_end + 1
         for header in headers:
             delimiter = header.group(2)
-            terminator = re.search(
-                r"^[ \t]*" + re.escape(delimiter) + r"[ \t]*(?=;|\r?$)",
-                command,
-                re.M,
-            )
+            terminator = re.compile(
+                r"^[ \t]*" + re.escape(delimiter) + r"[ \t]*(?=;|\r?$)", re.M
+            ).search(command, cursor)
             if not terminator or terminator.start() < cursor:
                 break
             heredoc_bodies.append(command[cursor:terminator.start()])
@@ -1106,7 +1105,7 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
             heredoc_index += part_heredocs
             continue
         payloads: list[str] = []
-        if "|" in part:
+        if "|" in part and (part_heredocs == 0 or part.rfind("|") > part.rfind("<<")):
             left_side = part.rsplit("|", 1)[0]
             quoted_payloads = [value for _quote, value in re.findall(r"(['\"])(.*?)\1", left_side, re.S)]
             payloads.extend(quoted_payloads or [left_side])
