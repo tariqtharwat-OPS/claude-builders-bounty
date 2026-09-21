@@ -12,7 +12,7 @@ Importable n8n workflow for Issue #5. Every Friday at 5:00 PM (`America/New_York
 
 ## Behavior and safety
 
-- GitHub calls request commits with `since`/`until`, closed issues updated since the window start, and closed PRs sorted by update time. Normalizers exclude issue API rows that are really PRs and retain only PRs whose `merged_at` is inside the window.
+- GitHub calls request commits with `since`/`until`, closed issues updated since the window start, and closed PRs sorted by update time. Normalizers keep issue and commit timestamps inside the same seven-day window, exclude issue API rows that are really PRs, and retain only PRs whose `merged_at` is inside the window.
 - Empty GitHub arrays and n8n's `alwaysOutputData` sentinel items are normalized to empty lists; a no-activity week is never represented by a fabricated blank commit.
 - The prompt contains normalized JSON, asks Claude not to invent activity, and supports English or French.
 - Missing Claude text throws an error instead of reporting success. An empty destination also ends in an explicit failed execution; generated-but-undelivered is not success.

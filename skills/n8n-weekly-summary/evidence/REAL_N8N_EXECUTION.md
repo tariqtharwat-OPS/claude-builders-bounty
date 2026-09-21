@@ -7,11 +7,12 @@
 - Claude boundary: local deterministic HTTP double implementing the Anthropic messages response shape; production workflow still targets `https://api.anthropic.com/v1/messages` by default
 - Delivery boundary: local deterministic Discord HTTP receiver; no real channel was contacted
 - Observed final node: `Deliver to Discord`
-- n8n execution status: `success`, finished=true, UI execution ID 1
-- Workflow SHA-256: `7bbee3b6f04f567f3a7052b3828e4637c1850e3f2c64fae74ece14814d0f5eeb`
-- Final empty-week execution readback: `Normalize Commits` produced `commits=[]`; `Prepare Claude Prompt` reported `counts.commits=0`; the real n8n path reached `Generate with Claude` and `Deliver to Discord` successfully using controlled local doubles.
-- Final empty-week execution output SHA-256: `b323be3448718e82c43ee1dbb2b4e9f15436e8d8bc2b0ca205dca68f68a3d75f`
+- n8n execution status: `success`, finished=true, UI execution ID 2
+- Workflow SHA-256: `3660461ccda696e7342e7ddccd6070a1655c053810f461593494f6b245be2edc`
+- Final empty-week execution readback: `Normalize Issues`, `Normalize Commits`, and `Normalize Merged PRs` produced empty lists; `Prepare Claude Prompt` reported counts `0/0/0`; the real n8n path reached `Generate with Claude` and `Deliver to Discord` successfully using controlled local doubles.
+- Final empty-week execution output SHA-256: `70a8beaaee8acfe81ff2cc6b64ca3cedd42cefbf4866dfcc796b4d6cc68f797e`
+- Final n8n Executions screenshot SHA-256: `648d255b13843efbd8a9dbb7c00a94d94b3209dc25c41991229405578a03d61d`
 
-The first adversarial empty-week run exposed two failure modes: without `alwaysOutputData`, n8n could stop before Claude/delivery; with the sentinel enabled, an unfiltered normalizer could fabricate one blank commit. The release candidate both preserves the empty-week path and filters commit rows to valid GitHub commit objects. The final isolated n8n retest proved `commits=[]`, prompt count `0`, Claude invocation, and delivery without fabricated activity.
+The first adversarial empty-week run exposed two failure modes: without `alwaysOutputData`, n8n could stop before Claude/delivery; with the sentinel enabled, an unfiltered normalizer could fabricate one blank commit. The release candidate preserves the empty-week path, filters commit rows to valid GitHub commit objects, and bounds closed issues to `WEEK_START <= closed_at <= WEEK_END`. Final isolated n8n retests proved empty and populated windows, boundary exclusion, prompt counts, Claude invocation, and delivery without fabricated activity.
 
-The screenshot is a headless capture of the real local n8n Executions page after that retest. It contains no API key, webhook secret, or private repository data.
+The screenshot is a headless capture of the real local n8n Executions page after the corrected retest; it shows the corrected workflow's successful execution. It contains no API key, webhook secret, or private repository data.
