@@ -961,12 +961,16 @@ def expand_simple_option_assignments(command: str) -> str:
     assignments = {name: flags for name, _quote, flags in _SHORT_OPTION_ASSIGNMENT.findall(command)}
     for name, flags in assignments.items():
         command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", flags, command)
-    for name, expression in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)=((?:\$'[^']*'|[A-Za-z0-9_-])+)", command):
-        decoded = re.sub(
-            r"\$'([^']*)'",
-            lambda match: _decode_ansi_c(match.group(1)),
-            expression,
-        )
+    for name, expression in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)=(-[rRfF](?:\\[rRfF])+)", command):
+        decoded = expression.replace("\\", "")
+        command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", decoded, command)
+    for name, expression in re.findall(
+        r"\b([A-Za-z_][A-Za-z0-9_]*)=((?:(?:\$)?'[^']*'|\"[^\"]*\"|[A-Za-z0-9_\\-])+)",
+        command,
+    ):
+        decoded = re.sub(r"\$?'([^']*)'", lambda match: _decode_ansi_c(match.group(1)), expression)
+        decoded = re.sub(r'\"([^\"]*)\"', r"\1", decoded)
+        decoded = re.sub(r"\\(.)", r"\1", decoded)
         if re.fullmatch(r"-[rRfF]+", decoded):
             command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", decoded, command)
     return command
@@ -975,11 +979,17 @@ def expand_simple_option_assignments(command: str) -> str:
 def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
     """Inspect SQL text fed to sqlite3 through stdin rather than argv."""
     clients = {"sqlite3", "psql", "mysql", "sqlcmd"}
-    client_present = any(
-        posixpath.basename(token.value) in clients
-        for token_group in tokenize(command)
-        for token in token_group
-    )
+    wrappers = {"sudo", "env", "command", "nice", "timeout", "nohup", "exec", "xargs"}
+    client_present = False
+    for token_group in tokenize(command):
+        for index, token in enumerate(token_group):
+            if posixpath.basename(token.value) in clients and (
+                index == 0 or any(posixpath.basename(previous.value) in wrappers for previous in token_group[:index])
+            ):
+                client_present = True
+                break
+        if client_present:
+            break
     if not client_present or ("|" not in command and "<<" not in command):
         return False
     left_side = command.rsplit("|", 1)[0] if "|" in command else ""
