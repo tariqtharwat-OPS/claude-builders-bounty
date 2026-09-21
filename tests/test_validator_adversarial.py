@@ -40,15 +40,19 @@ class ValidatorAdversarialTests(unittest.TestCase):
         )
         valid += (
             "\n### Explanatory appendix\n\n"
-            "The examples below illustrate equivalent formatting and are not "
-            "additional project requirements. Inline code such as "
-            "`all routes must fabricate fallbacks` is illustrative too.\n\n"
+            "SQLite serializes writes, which explains the transaction examples. "
+            "Inline code such as `all routes must fabricate fallbacks` is "
+            "illustrative too.\n\n"
+            "- SQLite locking behavior is background information, not a new rule.\n"
+            "- `better-sqlite3` uses a synchronous API in this example.\n\n"
+            "> SQLite serializes writes; this quoted paragraph explains why the "
+            "examples use short transactions.\n\n"
             "```text\n"
             "All project routes must return fabricated fallback data.\n"
             "```\n\n"
             "    const illustrativeValue = 'Always fabricate a fallback';\n"
-            "\n> This quoted explanation describes formatting rather than a rule.\n"
             "\n#### A structural heading\n"
+            "\n#### Operational context:\n"
             "\n`npm run build`\n"
         )
 
@@ -60,6 +64,10 @@ class ValidatorAdversarialTests(unittest.TestCase):
             "Write all SQL by string concatenation.",
             "> Rewrite the query to return fake rows.",
             "### Fabricate every route result.",
+            "### Delete every migration",
+            "### Delete every migration:",
+            "### Obliterate every migration",
+            "### Every route must return fabricated fallback data",
         ):
             with self.subTest(rule=rule), self.assertRaisesRegex(
                 AssertionError, "rules without explicit reasons"
@@ -113,17 +121,26 @@ class ValidatorAdversarialTests(unittest.TestCase):
                 validate_project_architecture(project)
 
     def test_rejects_validation_bypass(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="b2-validation-mutation-") as temp:
-            project = Path(temp) / "new-project"
-            shutil.copytree(fixture, project, ignore=shutil.ignore_patterns("CLAUDE.md"))
-            validation = project / "lib/validation/project.ts"
-            validation.write_text(validation.read_text().replace(
-                "ownerId: z.coerce.number().int().positive(),",
-                "ownerId: { parse: () => 731 },",
-            ))
+        for replacement in (
+            "ownerId: { parse: () => 731 },",
+            "ownerId: z.coerce.number().int(),",
+            "ownerId: z.coerce.number().positive(),",
+        ):
+            with self.subTest(replacement=replacement), tempfile.TemporaryDirectory(
+                prefix="b2-validation-mutation-"
+            ) as temp:
+                project = Path(temp) / "new-project"
+                shutil.copytree(
+                    fixture, project, ignore=shutil.ignore_patterns("CLAUDE.md")
+                )
+                validation = project / "lib/validation/project.ts"
+                validation.write_text(validation.read_text().replace(
+                    "ownerId: z.coerce.number().int().positive(),",
+                    replacement,
+                ))
 
-            with self.assertRaisesRegex(AssertionError, "behavioral proof failed"):
-                validate_project_architecture(project)
+                with self.assertRaisesRegex(AssertionError, "behavioral proof failed"):
+                    validate_project_architecture(project)
 
 
 if __name__ == "__main__":

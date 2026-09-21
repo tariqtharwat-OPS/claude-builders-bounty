@@ -26,78 +26,104 @@ REQUIRED_TEMPLATE_CONTRACT = [
 ]
 
 LIST_ITEM = re.compile(r"^\s{0,3}(?:[-+*]|\d+[.)])\s+(.*)$")
-FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
 MARKDOWN_ONLY = re.compile(r"^\s{0,3}(?:=+|-+)\s*$")
 
-# Explicit obligation language catches rules embedded inside declarative
-# sentences. Subjectless prose is treated as imperative by default, instead of
-# trying to enumerate every English verb (the bypass this validator must stop).
+# Declarative rules are identified by explicit obligation language. Imperative
+# rules have no grammatical subject, so recognize the command verbs used by a
+# software contract rather than treating every noun-led sentence/list item as
+# a command. Keeping these signals separate prevents Markdown structure from
+# deciding semantics.
 OBLIGATION_LANGUAGE = re.compile(
     r"\b(?:must|shall|should|never|always|may not|required to|do not|don't)\b",
     re.IGNORECASE,
 )
-EXPLANATORY_OPENING = re.compile(
-    r"^(?:(?:the|this|that|these|those|a|an|every|each|some|many|most|no)\s+"
-    r"|(?:it|they|we|i|he|she|you)\s+"
-    r"|(?:for example|for instance|because|although|while|when|where|why|how|"
-    r"in this|in the|on this|by contrast|as a result|therefore|however)\b)",
+IMPERATIVE_OPENING = re.compile(
+    r"^(?:(?:before|after|when|while|if|unless)\b[^,]*,\s*)?"
+    r"(?:add|apply|assert|avoid|build|cache|call|change|choose|create|declare|"
+    r"delete|disable|edit|enable|ensure|exclude|export|fabricate|fail|include|"
+    r"index|inspect|keep|let|make|migrate|name|pass|prefer|preserve|read|record|"
+    r"remove|report|require|return|rewrite|run|send|set|stop|store|treat|use|"
+    r"validate|verify|wrap|write)\b",
     re.IGNORECASE,
 )
-EXPLANATORY_LABEL = re.compile(r"^(?:example|examples|note|notes):\s*$", re.IGNORECASE)
+COMMAND_WITH_OBJECT = re.compile(
+    r"^(?P<verb>[A-Za-z][A-Za-z'-]*)\s+"
+    r"(?:a|an|all|any|each|every|no|the|this|that|these|those|our|your)\b",
+    re.IGNORECASE,
+)
 
 
-def markdown_contract_blocks(text: str) -> tuple[list[tuple[int, str]], bool]:
-    """Return prose/list blocks outside Markdown code, plus fence validity."""
-    blocks: list[tuple[int, str]] = []
+def markdown_contract_blocks(text: str) -> tuple[list[tuple[int, str, str]], bool]:
+    """Return semantic Markdown text blocks outside code, plus fence validity."""
+    blocks: list[tuple[int, str, str]] = []
     current: list[str] = []
     current_line = 0
+    current_kind = ""
     fence_marker = ""
+    fence_length = 0
 
     def flush() -> None:
-        nonlocal current, current_line
+        nonlocal current, current_line, current_kind
         if current:
-            blocks.append((current_line, " ".join(part.strip() for part in current)))
+            blocks.append(
+                (current_line, " ".join(part.strip() for part in current), current_kind)
+            )
             current = []
             current_line = 0
+            current_kind = ""
 
-    for number, line in enumerate(text.splitlines(), 1):
+    for number, raw_line in enumerate(text.splitlines(), 1):
         # Block quotes are prose, not code. Remove nested quote markers so
         # formatting cannot hide an instruction.
-        line = re.sub(r"^\s{0,3}(?:>\s*)+", "", line)
+        line = re.sub(r"^\s{0,3}(?:>\s*)+", "", raw_line)
         fence = FENCE.match(line)
-        if fence:
-            marker = fence.group(1)
-            if not fence_marker:
-                flush()
-                fence_marker = marker[0]
-            elif marker[0] == fence_marker:
-                fence_marker = ""
-            continue
         if fence_marker:
+            marker = fence.group(1) if fence else ""
+            if (
+                marker
+                and marker[0] == fence_marker
+                and len(marker) >= fence_length
+                and not fence.group(2).strip()
+            ):
+                fence_marker = ""
+                fence_length = 0
+            continue
+        if fence:
+            flush()
+            marker = fence.group(1)
+            fence_marker = marker[0]
+            fence_length = len(marker)
             continue
         if not line.strip() or MARKDOWN_ONLY.match(line):
             flush()
             continue
-        heading = re.match(r"^\s{0,3}#{1,6}\s+(.*)$", line)
+        heading = re.match(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$", line)
         if heading:
             flush()
-            # Sentence-like headings can carry rules; ordinary section labels
-            # remain Markdown structure.
-            if re.search(r"[.!?]\s*$", heading.group(1)):
-                blocks.append((number, heading.group(1)))
+            # Headings are text too: labels naturally pass the semantic rule
+            # check, while imperative or obligation-bearing headings do not.
+            blocks.append((number, heading.group(1), "heading"))
             continue
-        # Four-space/tab-indented Markdown is a code example, unless it is a
-        # continuation of the list/prose block immediately above it.
-        if (line.startswith("    ") or line.startswith("\t")) and not current:
+        indented = raw_line.startswith("    ") or raw_line.startswith("\t")
+        if indented:
+            # A wrapped list continuation can carry its Reason. Other
+            # four-space/tab-indented blocks are Markdown code examples.
+            if current_kind == "list":
+                current.append(line)
+            else:
+                flush()
             continue
         item = LIST_ITEM.match(line)
         if item:
             flush()
             current_line = number
+            current_kind = "list"
             current = [item.group(1)]
             continue
         if not current_line:
             current_line = number
+            current_kind = "prose"
         current.append(line)
 
     flush()
@@ -112,21 +138,30 @@ def validate_template_text(text: str) -> None:
 
     rules_without_reasons = []
     blocks, fences_closed = markdown_contract_blocks(text)
-    lines = text.splitlines()
-    for number, block in blocks:
-        # Inline code is example syntax, just like fenced and indented code.
-        prose = re.sub(r"(`+).*?\1", "", block).strip()
+    for number, block, kind in blocks:
+        # Inline code is example syntax. Replace it with a neutral subject
+        # token, rather than deleting it and making explanatory text such as
+        # "`SQLite` uses ..." look subjectless.
+        prose = re.sub(r"(`+).*?\1", "CODE", block).strip()
         if not prose:
             continue
         has_reason = bool(re.search(r"\bReason\s*:", prose, re.IGNORECASE))
-        original_line = re.sub(r"^\s{0,3}(?:>\s*)+", "", lines[number - 1])
-        list_item = bool(LIST_ITEM.match(original_line))
-        explanatory = bool(
-            EXPLANATORY_OPENING.match(prose) or EXPLANATORY_LABEL.fullmatch(prose)
+        explanatory_heading = kind == "heading" and bool(
+            re.match(r"^(?:what|why|how|when|where)\b", prose, re.IGNORECASE)
         )
-        if not has_reason and (
-            list_item or OBLIGATION_LANGUAGE.search(prose) or not explanatory
-        ):
+        object_command = COMMAND_WITH_OBJECT.match(prose)
+        # Gerund-led labels such as "Understanding the schema" are noun
+        # phrases, while a base-form verb followed by an object determiner is
+        # command-shaped even when that verb is not in the contract lexicon.
+        arbitrary_imperative = bool(
+            object_command and not object_command.group("verb").lower().endswith("ing")
+        )
+        enforceable = not explanatory_heading and bool(
+            OBLIGATION_LANGUAGE.search(prose)
+            or IMPERATIVE_OPENING.match(prose)
+            or arbitrary_imperative
+        )
+        if enforceable and not has_reason:
             rules_without_reasons.append((number, block))
 
     assert fences_closed, "unclosed Markdown code fence"
@@ -142,6 +177,10 @@ def compact_typescript(source: str) -> str:
 def prove_route_behavior(project: Path) -> None:
     """Execute the checked-in TS route through validation, service, and query."""
     proof_value = f"db-proof-{uuid.uuid4()}"
+    proof_owner = 1000 + uuid.uuid4().int % 1_000_000
+    absent_owner = proof_owner + 1
+    proof_project = 1000 + uuid.uuid4().int % 1_000_000
+    proof_created_at = f"proof-time-{uuid.uuid4()}"
     with tempfile.TemporaryDirectory(prefix="b2-route-proof-") as temp:
         harness = Path(temp)
         next_shim = harness / "next-server.mjs"
@@ -216,23 +255,25 @@ def prove_route_behavior(project: Path) -> None:
             import {{ GET }} from {json.dumps((project / "app/api/projects/route.ts").as_uri())};
             db.exec({json.dumps((project / "migrations/0001_initial.sql").read_text())});
             db.prepare("INSERT INTO users (id, email, created_at) VALUES (?, ?, ?)")
-              .run(731, "proof@example.test", "2026-09-21T00:00:00Z");
+              .run({proof_owner}, "proof@example.test", {json.dumps(proof_created_at)});
             db.prepare("INSERT INTO projects (id, owner_id, name, created_at) VALUES (?, ?, ?, ?)")
-              .run(947, 731, {json.dumps(proof_value)}, "2026-09-21T00:00:01Z");
+              .run({proof_project}, {proof_owner}, {json.dumps(proof_value)}, {json.dumps(proof_created_at)});
 
-            const valid = await GET(new Request("https://example.test/api/projects?ownerId=731"));
+            const valid = await GET(new Request("https://example.test/api/projects?ownerId={proof_owner}"));
             const validBody = await valid.json();
             if (valid.status !== 200 || JSON.stringify(validBody) !== JSON.stringify({{
-              projects: [{{ id: 947, ownerId: 731, name: {json.dumps(proof_value)}, createdAt: "2026-09-21T00:00:01Z" }}],
+              projects: [{{ id: {proof_project}, ownerId: {proof_owner}, name: {json.dumps(proof_value)}, createdAt: {json.dumps(proof_created_at)} }}],
             }})) throw new Error(`valid route result was not database-backed: ${{valid.status}} ${{JSON.stringify(validBody)}}`);
 
-            const absent = await GET(new Request("https://example.test/api/projects?ownerId=732"));
+            const absent = await GET(new Request("https://example.test/api/projects?ownerId={absent_owner}"));
             if (absent.status !== 200 || JSON.stringify(await absent.json()) !== JSON.stringify({{ projects: [] }}))
               throw new Error("owner filter did not reach the query");
 
-            const invalid = await GET(new Request("https://example.test/api/projects?ownerId=not-an-id"));
-            if (invalid.status !== 400 || JSON.stringify(await invalid.json()) !== JSON.stringify({{ error: "invalid_request" }}))
-              throw new Error("validation did not control the route response");
+            for (const ownerId of ["not-an-id", "0", "1.5"]) {{
+              const invalid = await GET(new Request(`https://example.test/api/projects?ownerId=${{ownerId}}`));
+              if (invalid.status !== 400 || JSON.stringify(await invalid.json()) !== JSON.stringify({{ error: "invalid_request" }}))
+                throw new Error(`validation accepted invalid ownerId ${{ownerId}}`);
+            }}
         """).strip() + "\n")
         result = subprocess.run(
             ["node", "--experimental-strip-types", "--import", str(loader), str(runner)],
