@@ -71,6 +71,19 @@ _NON_VERB_STARTERS = frozenset({
     "patterns", "definition", "connection", "versions", "rules",
     "understanding", "operational", "explanatory", "contract", "naming",
 })
+# Head nouns that make a heading a conventional section label rather than a
+# subjectless instruction. This is deliberately heading-specific: prose such
+# as "Delete the strategy" must still be treated as a command. Matching the
+# final word captures ordinary noun phrases such as "Migration strategy" and
+# "Database architecture" without teaching the imperative detector that
+# "migration" or "database" can never be verbs.
+_SECTION_LABEL_HEADS = frozenset({
+    "appendix", "architecture", "background", "commands", "concepts",
+    "configuration", "considerations", "context", "contract", "conventions",
+    "design", "example", "examples", "guide", "guidelines", "introduction", "migration",
+    "migrations", "notes", "overview", "patterns", "policy", "reference",
+    "rules", "schema", "stack", "strategy", "structure", "summary", "versions",
+})
 # Determiners that can serve as command objects (e.g., "every migration").
 _DETERMINERS = frozenset({
     "a", "an", "the", "every", "each", "all", "this", "that",
@@ -191,11 +204,26 @@ def validate_template_text(text: str) -> None:
         # not a known non-verb (determiner, pronoun, modal, question
         # word, common noun, or section label). This catches arbitrary
         # verbs without suffix heuristics or finite verb lists.
-        first_word = prose.split()[0].lower() if prose else ""
-        # Standalone imperative: a single word (with optional period)
-        # that is not a known non-verb, appearing as a prose sentence.
-        standalone_imperative = kind == "prose" and bool(
-            re.match(r"^[A-Za-z][A-Za-z'-]*\.?$", prose)
+        words = re.findall(r"[A-Za-z][A-Za-z'-]*", prose.lower())
+        first_word = words[0] if words else ""
+        section_label = bool(
+            kind == "heading"
+            and words
+            and words[-1] in _SECTION_LABEL_HEADS
+            and not any(word in _DETERMINERS for word in words[1:])
+            and not OBLIGATION_LANGUAGE.search(prose)
+        )
+        # Standalone imperative: a single word that is not a known non-verb.
+        # Headings also allow a trailing colon, so heading punctuation cannot
+        # hide an enforceable command; a prose label such as "Example:" remains
+        # distinct from the existing one-word prose-command form.
+        standalone_pattern = (
+            r"^[A-Za-z][A-Za-z'-]*[.:]?$"
+            if kind == "heading"
+            else r"^[A-Za-z][A-Za-z'-]*\.?$"
+        )
+        standalone_imperative = bool(
+            re.match(standalone_pattern, prose)
         ) and first_word not in _NON_VERB_STARTERS
         if kind == "heading":
             # Headings with determiner objects are commands.
@@ -213,8 +241,8 @@ def validate_template_text(text: str) -> None:
         )
         enforceable = not explanatory_heading and bool(
             OBLIGATION_LANGUAGE.search(prose)
-            or arbitrary_imperative
-            or standalone_imperative
+            or (arbitrary_imperative and not section_label)
+            or (standalone_imperative and not section_label)
         )
         if enforceable and not has_reason:
             rules_without_reasons.append((number, block))

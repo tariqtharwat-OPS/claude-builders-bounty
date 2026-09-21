@@ -192,6 +192,21 @@ class ValidatorAdversarialTests(unittest.TestCase):
             ):
                 validate_template_text(template.read_text() + f"\n{rule}\n")
 
+    def test_rejects_standalone_imperative_headings(self) -> None:
+        for rule in (
+            "### Frobnicate",
+            "### Frobnicate:",
+        ):
+            with self.subTest(rule=rule), self.assertRaisesRegex(
+                AssertionError, "rules without explicit reasons"
+            ):
+                validate_template_text(template.read_text() + f"\n{rule}\n")
+
+    def test_accepts_explanatory_noun_phrase_heading(self) -> None:
+        validate_template_text(
+            template.read_text() + "\n### Migration strategy\n"
+        )
+
     def test_accepts_legitimate_explanatory_headings_after_hardening(self) -> None:
         """Ensure structural hardening does not block legitimate explanatory
         prose, headings, blockquotes, wrapped reasons, inline code,
