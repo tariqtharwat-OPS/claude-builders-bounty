@@ -404,8 +404,10 @@ def split_heredocs(text: str) -> tuple[str, list[str], list[str]]:
         while j < len(text) and text[j] in " \t":
             j += 1
         quoted = j < len(text) and text[j] in "'\""
+        escaped_delimiter = j < len(text) and text[j] == "\\"
+        quoted = quoted or escaped_delimiter
         q = text[j] if quoted else ""
-        if quoted:
+        if quoted or escaped_delimiter:
             j += 1
         start = j
         while j < len(text) and (text[j] not in " \t\r\n;|&<>" and (not q or text[j] != q)):
@@ -894,7 +896,7 @@ def sql_code(value: str) -> str:
             else:
                 i += 1
             continue
-        if state in {"'", '"', "`"}:
+        if state == "'":
             quote = state
             out[i] = " "
             if value[i] == quote:
@@ -907,6 +909,14 @@ def sql_code(value: str) -> str:
                 out[i + 1] = " "
                 i += 2
                 continue
+            i += 1
+            continue
+        if state in {'"', "`"}:
+            # Double-quoted and backtick-quoted SQL names are identifiers,
+            # not string literals; retain their contents for DELETE matching.
+            quote = state
+            if value[i] == quote:
+                state = None
             i += 1
             continue
         if value.startswith("--", i):
@@ -929,7 +939,7 @@ def sql_code(value: str) -> str:
 def sql_delete_without_where(value: str) -> bool:
     cleaned = sql_code(value)
     for statement in cleaned.split(";"):
-        if re.match(r"^\s*delete\s+from\s+[^\s;]+(?:\s|$)", statement, re.I) and not re.search(r"\bwhere\b", statement, re.I):
+        if re.search(r"\bdelete\s+from\s+(?:[^\s;]+|\"[^\"]+\"|`[^`]+`)(?:\s|$)", statement, re.I) and not re.search(r"\bwhere\b", statement, re.I):
             return True
     return False
 
@@ -1016,19 +1026,84 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
         parts.append(text[start:])
         return parts
 
+    def heredoc_count(text: str) -> int:
+        count = 0
+        quote: str | None = None
+        i = 0
+        while i < len(text):
+            char = text[i]
+            if quote:
+                if char == "\\" and quote == '"':
+                    i += 2
+                    continue
+                if char == quote:
+                    quote = None
+                i += 1
+                continue
+            if char in "'\"":
+                quote = char
+            elif text.startswith("<<", i) and not text.startswith("<<<", i):
+                count += 1
+                i += 2
+                continue
+            i += 1
+        return count
+
     structural_command, _, _ = split_heredocs(command)
-    heredoc_bodies = [match.group("body") for match in re.finditer(
-        r"<<-?\s*(?P<quote>['\"]?)(?P<delimiter>[A-Za-z_][A-Za-z0-9_]*)"
-        r"(?P=quote)[^\n]*\n(?P<body>.*?)^[ \t]*(?P=delimiter)[ \t]*(?=;|\r?$)",
-        command,
-        re.M | re.S,
-    )]
+    heredoc_header = re.compile(r"<<-?\s*\\?(['\"]?)([A-Za-z0-9_-]+)\1")
+    actual_headers: list[re.Match[str]] = []
+    quote: str | None = None
+    escaped = False
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = None
+        elif char in "'\"":
+            quote = char
+        elif command.startswith("<<", index) and not command.startswith("<<<", index):
+            header = heredoc_header.match(command, index)
+            if header:
+                actual_headers.append(header)
+                index = header.end()
+                continue
+        index += 1
+    heredoc_bodies: list[str] = []
+    header_index = 0
+    while header_index < len(actual_headers):
+        first = actual_headers[header_index]
+        line_end = command.find("\n", first.start())
+        if line_end < 0:
+            break
+        headers = [first]
+        while header_index + len(headers) < len(actual_headers) and actual_headers[header_index + len(headers)].start() < line_end:
+            headers.append(actual_headers[header_index + len(headers)])
+        cursor = line_end + 1
+        for header in headers:
+            delimiter = header.group(2)
+            terminator = re.search(
+                r"^[ \t]*" + re.escape(delimiter) + r"[ \t]*(?=;|\r?$)",
+                command,
+                re.M,
+            )
+            if not terminator or terminator.start() < cursor:
+                break
+            heredoc_bodies.append(command[cursor:terminator.start()])
+            cursor = terminator.end()
+        header_index += len(headers)
     heredoc_index = 0
     for part in shell_command_parts(structural_command):
         if "|" not in part and "<<" not in part:
             continue
-        if not any(command_name(group)[0] in clients for group in tokenize(part)):
-            heredoc_index += part.count("<<")
+        part_heredocs = heredoc_count(part)
+        groups = tokenize(part)
+        if not any(command_name(group)[0] in clients for group in groups):
+            heredoc_index += part_heredocs
             continue
         payloads: list[str] = []
         if "|" in part:
@@ -1036,10 +1111,15 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
             quoted_payloads = [value for _quote, value in re.findall(r"(['\"])(.*?)\1", left_side, re.S)]
             payloads.extend(quoted_payloads or [left_side])
         if "<<" in part:
-            for _ in range(part.count("<<")):
-                if heredoc_index < len(heredoc_bodies):
-                    payloads.append(heredoc_bodies[heredoc_index])
-                heredoc_index += 1
+            last_pipe = part.rfind("|")
+            last_segment = part[last_pipe + 1 :]
+            last_name = command_name(tokenize(last_segment)[0])[0] if tokenize(last_segment) else None
+            segment_has_heredoc = "<<" in last_segment
+            if last_name in clients and heredoc_index + part_heredocs <= len(heredoc_bodies):
+                # Only the final stdin redirection feeds a command. Earlier
+                # heredocs are superseded by a later redirection.
+                payloads.append(heredoc_bodies[heredoc_index + part_heredocs - 1])
+            heredoc_index += part_heredocs
         if any(sql_delete_without_where(payload) or sql_schema_destructive(payload) for payload in payloads):
             return True
     return False
