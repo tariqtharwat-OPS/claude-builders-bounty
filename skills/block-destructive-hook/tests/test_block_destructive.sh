@@ -146,6 +146,7 @@ assert_decision "printf 'DELETE FROM users;' 2>&1 | sqlite3 db" deny 'denies SQL
 assert_decision "printf 'DROP TABLE users;' | sqlite3 db </dev/null" neutral 'respects final stdin file redirection'
 assert_decision "psql -c 'DELETE FROM users RETURNING \$\$where\$\$;'" deny 'ignores dollar-quoted RETURNING identifier'
 assert_decision "sqlite3 db 'DELETE FROM users RETURNING [where];'" deny 'ignores bracket-quoted RETURNING identifier'
+assert_decision 'sqlite3 db "DELETE FROM users RETURNING \"where\";"' deny 'preserves escaped SQL identifiers inside shell quotes'
 assert_decision "psql -c 'SELECT \$\$DROP TABLE users\$\$;'" neutral 'allows dollar-quoted SQL string'
 assert_decision "sqlite3 db \"SELECT 'a;b'; DELETE FROM users WHERE id=1;\"" neutral 'preserves SQL statement boundaries inside strings'
 assert_decision 'opts=-rf; rm $opts build; opts=-i' deny 'uses assignment value at rm use site'

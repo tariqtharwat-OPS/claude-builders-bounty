@@ -606,7 +606,10 @@ def tokenize(text: str) -> list[list[Token]]:
             buf.append(ch)
             escaped = False
         elif quote:
-            if ch == quote:
+            if ch == "\\" and quote == '"' and i + 1 < len(text):
+                buf.append(text[i + 1])
+                i += 1
+            elif ch == quote:
                 quote = None
                 had_quote = True
             else:
