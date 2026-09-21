@@ -410,9 +410,15 @@ def split_heredocs(text: str) -> tuple[str, list[str], list[str]]:
         if quoted or escaped_delimiter:
             j += 1
         start = j
-        while j < len(text) and (text[j] not in " \t\r\n;|&<>" and (not q or text[j] != q)):
-            j += 1
-        delim = text[start:j]
+        if q:
+            while j < len(text) and text[j] != q and text[j] not in "\r\n":
+                j += 1
+        else:
+            while j < len(text) and text[j] not in " \t\r\n;|&<>":
+                j += 1
+        raw_delim = text[start:j]
+        delim = raw_delim.replace('"', '').replace("'", '')
+        quoted = quoted or escaped_delimiter or raw_delim != delim
         if q and j < len(text) and text[j] == q:
             j += 1
         line_end = text.find("\n", j)
@@ -874,7 +880,7 @@ def shell_rm_dangerous(tokens: list[Token], index: int) -> bool:
     return False
 
 
-def sql_code(value: str) -> str:
+def sql_code(value: str, preserve_identifiers: bool = False) -> str:
     """Mask SQL comments and quoted literals while preserving code layout."""
     out = list(value)
     i = 0
@@ -911,11 +917,18 @@ def sql_code(value: str) -> str:
                 continue
             i += 1
             continue
-        if state in {'"', "`"}:
+        if state in {'"', '`'} and preserve_identifiers:
             # Double-quoted and backtick-quoted SQL names are identifiers,
             # not string literals; retain their contents for DELETE matching.
             quote = state
             if value[i] == quote:
+                out[i] = " "
+                state = None
+            i += 1
+            continue
+        if state in {'"', '`'}:
+            out[i] = " "
+            if value[i] == state:
                 state = None
             i += 1
             continue
@@ -937,10 +950,23 @@ def sql_code(value: str) -> str:
 
 
 def sql_delete_without_where(value: str) -> bool:
-    cleaned = sql_code(value)
-    for statement in cleaned.split(";"):
+    cleaned = sql_code(value, preserve_identifiers=True)
+
+    def has_top_level_where(text: str) -> bool:
+        cleaned_tail = sql_code(text)
+        depth = 0
+        for match in re.finditer(r"[()]|\bwhere\b", cleaned_tail, re.I):
+            if match.group() == "(":
+                depth += 1
+            elif match.group() == ")":
+                depth = max(0, depth - 1)
+            elif depth == 0:
+                return True
+        return False
+
+    for statement, raw_statement in zip(cleaned.split(";"), value.split(";")):
         delete = re.search(r"\bdelete\s+from\s+(?:[^\s;]+|\"[^\"]+\"|`[^`]+`)(?:\s|$)", statement, re.I)
-        if delete and not re.search(r"\bwhere\b", statement[delete.end() :], re.I):
+        if delete and not has_top_level_where(raw_statement[delete.end() :]):
             return True
     return False
 
@@ -1023,6 +1049,9 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
                 parts.append(text[start:index])
                 start = index + 2
                 index += 1
+            elif char == "&":
+                parts.append(text[start:index])
+                start = index + 1
             index += 1
         parts.append(text[start:])
         return parts
@@ -1051,13 +1080,15 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
         return count
 
     structural_command, _, _ = split_heredocs(command)
-    heredoc_header = re.compile(r"<<-?\s*\\?(['\"]?)([^\s;|&<>]+)\1")
+    heredoc_header = re.compile(
+        r"<<-?\s*\\?(?:(?P<quote>['\"])(?P<quoted>[^'\"\r\n]+)(?P=quote)|(?P<bare>[^\s;|&<>]+))"
+    )
     actual_headers: list[re.Match[str]] = []
     quote: str | None = None
     escaped = False
     index = 0
-    while index < len(command):
-        char = command[index]
+    while index < len(structural_command):
+        char = structural_command[index]
         if escaped:
             escaped = False
         elif char == "\\" and quote != "'":
@@ -1067,8 +1098,8 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
                 quote = None
         elif char in "'\"":
             quote = char
-        elif command.startswith("<<", index) and not command.startswith("<<<", index):
-            header = heredoc_header.match(command, index)
+        elif structural_command.startswith("<<", index) and not structural_command.startswith("<<<", index):
+            header = heredoc_header.match(structural_command, index)
             if header:
                 actual_headers.append(header)
                 index = header.end()
@@ -1086,7 +1117,7 @@ def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
             headers.append(actual_headers[header_index + len(headers)])
         cursor = line_end + 1
         for header in headers:
-            delimiter = header.group(2)
+            delimiter = header.group("quoted") or header.group("bare")
             terminator = re.compile(
                 r"^[ \t]*" + re.escape(delimiter) + r"[ \t]*(?=;|\r?$)", re.M
             ).search(command, cursor)
