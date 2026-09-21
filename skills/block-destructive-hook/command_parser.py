@@ -418,7 +418,15 @@ def split_heredocs(text: str) -> tuple[str, list[str], list[str]]:
             i = j
             continue
         body_start = line_end + 1
-        pattern = r"^" + (r"\t*" if strip_tabs else "") + re.escape(delim) + r"[ \t]*$"
+        # Accept a terminator followed by a command separator as a defensive
+        # recovery for pasted/malformed shell input, while leaving the
+        # separator itself visible to the ordinary command tokenizer.
+        pattern = (
+            r"^"
+            + (r"\t*" if strip_tabs else "")
+            + re.escape(delim)
+            + r"[ \t]*(?=;|\r?$)"
+        )
         match = re.compile(pattern, re.M).search(text, body_start)
         if not match:
             i = j
@@ -953,7 +961,7 @@ def git_force_push(tokens: list[Token], index: int) -> bool:
     return any(t.value in {"-f", "--force", "--force-with-lease"} or t.value.startswith("--force-with-lease=") for t in args[i + 1 :])
 
 
-_SHORT_OPTION_ASSIGNMENT = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)=(?:\$)?([\"']?)(-[rRfF]+)\2(?=\s*;|\s|$)")
+_SHORT_OPTION_ASSIGNMENT = re.compile(r"(?:^|[;&|\n]\s*)([A-Za-z_][A-Za-z0-9_]*)=(?:\$)?([\"']?)(-[rRfF]+)\2(?=\s*;|\s|$)")
 
 
 def expand_simple_option_assignments(command: str) -> str:
@@ -961,11 +969,11 @@ def expand_simple_option_assignments(command: str) -> str:
     assignments = {name: flags for name, _quote, flags in _SHORT_OPTION_ASSIGNMENT.findall(command)}
     for name, flags in assignments.items():
         command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", flags, command)
-    for name, expression in re.findall(r"(?:^|[;&|]\s*)([A-Za-z_][A-Za-z0-9_]*)=(-[rRfF](?:\\[rRfF])+)", command):
+    for name, expression in re.findall(r"(?:^|[;&|\n]\s*)([A-Za-z_][A-Za-z0-9_]*)=(-[rRfF](?:\\[rRfF])+)", command):
         decoded = expression.replace("\\", "")
         command = re.sub(rf"\${re.escape(name)}\b|\$\{{{re.escape(name)}\}}", decoded, command)
     for name, expression in re.findall(
-        r"(?:^|[;&|]\s*)([A-Za-z_][A-Za-z0-9_]*)=((?:(?:\$)?'[^']*'|\"[^\"]*\"|[A-Za-z0-9_\\-])+)",
+        r"(?:^|[;&|\n]\s*)([A-Za-z_][A-Za-z0-9_]*)=((?:(?:\$)?'[^']*'|\"[^\"]*\"|[A-Za-z0-9_\\-])+)",
         command,
     ):
         decoded = re.sub(r"\$?'([^']*)'", lambda match: _decode_ansi_c(match.group(1)), expression)
@@ -979,29 +987,44 @@ def expand_simple_option_assignments(command: str) -> str:
 def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
     """Inspect SQL text fed to sqlite3 through stdin rather than argv."""
     clients = {"sqlite3", "psql", "mysql", "sqlcmd"}
-    wrappers = {"sudo", "env", "command", "nice", "timeout", "nohup", "exec", "xargs"}
-    client_present = False
-    for token_group in tokenize(command):
-        executable, executable_index = command_name(token_group)
-        for index, token in enumerate(token_group):
-            if (
-                posixpath.basename(token.value) in clients
-                and index == executable_index
-                and (index == 0 or executable in clients or posixpath.basename(token_group[0].value) in wrappers)
-            ):
-                client_present = True
-                break
-        if client_present:
-            break
-    if not client_present or ("|" not in command and "<<" not in command):
-        return False
-    left_side = command.rsplit("|", 1)[0] if "|" in command else ""
-    quoted_payloads = [value for _quote, value in re.findall(r"(['\"])(.*?)\1", left_side, re.S)]
-    payloads = quoted_payloads or [left_side]
-    if "<<" in command:
-        heredoc_body = command.split("<<", 1)[1]
-        payloads.append(re.sub(r"^[^\r\n]*\r?\n", "", heredoc_body, count=1))
-    return any(sql_delete_without_where(payload) or sql_schema_destructive(payload) for payload in payloads)
+
+    def shell_semicolon_parts(text: str) -> list[str]:
+        parts: list[str] = []
+        start = 0
+        quote: str | None = None
+        escaped = False
+        for index, char in enumerate(text):
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote != "'":
+                escaped = True
+            elif quote:
+                if char == quote:
+                    quote = None
+            elif char in "'\"":
+                quote = char
+            elif char == ";":
+                parts.append(text[start:index])
+                start = index + 1
+        parts.append(text[start:])
+        return parts
+
+    for part in shell_semicolon_parts(command):
+        if "|" not in part and "<<" not in part:
+            continue
+        if not any(command_name(group)[0] in clients for group in tokenize(part)):
+            continue
+        payloads: list[str] = []
+        if "|" in part:
+            left_side = part.rsplit("|", 1)[0]
+            quoted_payloads = [value for _quote, value in re.findall(r"(['\"])(.*?)\1", left_side, re.S)]
+            payloads.extend(quoted_payloads or [left_side])
+        if "<<" in part:
+            heredoc_body = part.split("<<", 1)[1]
+            payloads.append(re.sub(r"^[^\r\n]*\r?\n", "", heredoc_body, count=1))
+        if any(sql_delete_without_where(payload) or sql_schema_destructive(payload) for payload in payloads):
+            return True
+    return False
 
 
 # is_destructive recurses into every substitution, wrapper payload, and -c
