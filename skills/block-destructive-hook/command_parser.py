@@ -240,7 +240,7 @@ def sql_client_statements(tokens: list[Token], index: int) -> list[str]:
             if value == "--":
                 positional.extend(item.value for item in args[i + 1 :])
                 break
-            if value in {"-cmd", "-init"} and i + 1 < len(args):
+            if value == "-cmd" and i + 1 < len(args):
                 statements.append(args[i + 1].value)
                 i += 2
             elif value in sqlite_value_options and i + 1 < len(args):
@@ -1198,6 +1198,44 @@ def expand_simple_option_assignments(command: str) -> str:
             decoded = previous + decoded
         events.append((match.end(), name, decoded))
 
+    # Assignment builtins accept multiple name=value words, and declare/
+    # typeset are equivalent state updates for the later command in the same
+    # shell list. Record every word rather than only the first one.
+    builtin_pattern = re.compile(
+        r"(?:^|[;&|\n])\s*(?:export|readonly|declare|typeset)\s+"
+        r"((?:(?:[A-Za-z_][A-Za-z0-9_]*)\s*(?:\+=|=)\s*"
+        r"(?:\$'[^']*'|'[^']*'|\"[^\"]*\"|[^\s;&|]+)\s*)+)"
+    )
+    assignment_word = re.compile(
+        r"([A-Za-z_][A-Za-z0-9_]*)\s*(\+=|=)\s*"
+        r"(\$'[^']*'|'[^']*'|\"[^\"]*\"|[^\s;&|]+)"
+    )
+    for statement in builtin_pattern.finditer(command):
+        for assignment in assignment_word.finditer(statement.group(1)):
+            name, operator, expression = assignment.groups()
+            pieces = re.findall(r"\$'([^']*)'|'([^']*)'|\"([^\"]*)\"|([^\s;&|]+)", expression)
+            decoded = "".join(
+                _decode_ansi_c(a) if a else b if b else c if c else d
+                for a, b, c, d in pieces
+            )
+            decoded = re.sub(r"\\(.)", r"\1", decoded)
+            absolute = statement.start(1) + assignment.start()
+            previous = next((value for start, old_name, value in reversed(events)
+                             if old_name == name and start <= absolute), "")
+            if operator == "+=":
+                decoded = (previous or "") + decoded
+            events.append((statement.start(1) + assignment.end(), name, decoded))
+
+    # `env name=value command ...` establishes the same literal value for the
+    # child command. The recursive shell-wrapper path carries these assignment
+    # tokens into the payload separately below.
+    env_pattern = re.compile(
+        r"(?:^|[;&|\n])\s*env\s+(?:-[^\s;&|]+\s+)*"
+        r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^\s;&|]+)"
+    )
+    for match in env_pattern.finditer(command):
+        events.append((match.end(), match.group(1), match.group(2)))
+
     # Shell variables are stateful at the point of use. A later `unset` must
     # invalidate an earlier literal assignment rather than leaving a stale
     # value available to the rm classifier.
@@ -1217,7 +1255,52 @@ def expand_simple_option_assignments(command: str) -> str:
             return value
         return match.group(0)
 
-    return re.sub(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})", replace_use, command)
+    # Apply expansion only outside single-quoted shell words. A regex-only
+    # substitution cannot distinguish executable `$name` from literal text.
+    variable = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})")
+    output: list[str] = []
+    i = 0
+    quote: str | None = None
+    while i < len(command):
+        ch = command[i]
+        if quote == "'":
+            output.append(ch)
+            i += 1
+            if ch == "'":
+                quote = None
+            continue
+        if quote == '"':
+            if ch == "\\" and i + 1 < len(command):
+                output.extend((ch, command[i + 1]))
+                i += 2
+                continue
+            match = variable.match(command, i)
+            if match:
+                output.append(replace_use(match))
+                i = match.end()
+                continue
+            output.append(ch)
+            i += 1
+            if ch == '"':
+                quote = None
+            continue
+        if ch in "'\"":
+            quote = ch
+            output.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < len(command):
+            output.extend((ch, command[i + 1]))
+            i += 2
+            continue
+        match = variable.match(command, i)
+        if match:
+            output.append(replace_use(match))
+            i = match.end()
+        else:
+            output.append(ch)
+            i += 1
+    return "".join(output)
 
 
 def piped_or_heredoc_sql_is_destructive(command: str) -> bool:
@@ -1520,7 +1603,12 @@ def is_destructive(command: str, _depth: int = 0) -> bool:
                     )
                     if no_exec:
                         break
-                    if payload and is_destructive(payload, _depth + 1):
+                    inherited = [
+                        item.value for item in tokens[:position]
+                        if _ASSIGNMENT_RE.match(item.value)
+                    ]
+                    payload_source = " ".join([*inherited, payload])
+                    if payload and is_destructive(payload_source, _depth + 1):
                         return True
                     break
         if name == "eval":
